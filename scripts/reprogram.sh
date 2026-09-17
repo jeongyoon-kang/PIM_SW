@@ -239,6 +239,13 @@ RUN_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 
 # Preflight BEFORE touching PCIe: if we cannot program, we must not detach the
 # device — that would leave the board unusable for no reason.
+# ABSOLUTE BEFORE VIVADO SEES IT.  Vivado is launched with `cd "$LOGDIR"` so its
+# own journal lands there, which means a relative --pdi resolves against a DIFFERENT
+# directory than the check below — the shell says the file is there and the Tcl says
+# it is not, naming a path that does exist from where you typed it.  Absolutising
+# here makes the two agree whatever the caller passed.
+[[ -n "${PDI:-}" ]] && PDI="$(readlink -f "$PDI" 2>/dev/null || echo "$PDI")"
+[[ -n "${LTX:-}" ]] && LTX="$(readlink -f "$LTX" 2>/dev/null || echo "$LTX")"
 [[ -f "$PDI" ]] || { log "ERROR: PDI not found: $PDI"; exit 2; }
 [[ -n "$LTX" ]] || log "WARN: no LTX alongside the PDI — ILA debug will be unavailable"
 [[ -f "$PROGRAM_TCL" ]] || { log "ERROR: program.tcl not found: $PROGRAM_TCL"; exit 2; }
