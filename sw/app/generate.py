@@ -139,13 +139,11 @@ def main() -> int:
               "lookup stay on the host;\n           see pimllm/model.py for why "
               "each one does.")
         m = PimModel(hf_id, s_max=args.s_max, geometry=g, verbose=True)
-        t0 = time.monotonic()
-        text = m.generate(args.prompt, max_new_tokens=args.max_new_tokens)
-        dt = time.monotonic() - t0
+        # The streamer prints each token as it lands, then the joined text and the
+        # rate; a second print here would only repeat it.
+        print(f"\n  prompt: {args.prompt!r}")
+        m.generate(args.prompt, max_new_tokens=args.max_new_tokens, stream=True)
         st = m.rt.stats()
-        print(f"\n{text}")
-        print(f"\n  {args.max_new_tokens} tokens in {dt:.2f} s  "
-              f"({args.max_new_tokens / dt:.2f} tok/s)")
         print(f"  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISRs, "
               f"{st['nwrvec']} vector loads, {st['launch_us'] / 1e6:.2f} s on the "
               f"doorbell")

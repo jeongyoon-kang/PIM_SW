@@ -23,14 +23,54 @@ not a matmul — so the two coexist rather than share.
 from __future__ import annotations
 
 import gc
+import sys
+import time
 
 import torch
 import torch.nn as nn
+from transformers import TextStreamer
 
 from . import attention, ops
 from .budget import ModelShape, plan
 from .cache import PimCache
 from .device import Geometry
+
+
+class TimedStreamer(TextStreamer):
+    """Prints each token as it arrives, with the time it took and the ISRs it cost.
+
+    The ISR count per token is the one number that separates "the card is slow" from
+    "the host is slow": it does not change with host load, so a token whose time
+    moved while its ISRs did not was spent somewhere other than the board.
+    """
+
+    def __init__(self, tokenizer, rt, **kw):
+        super().__init__(tokenizer, skip_prompt=True, skip_special_tokens=True, **kw)
+        self.rt = rt
+        self.t0 = self.tlast = time.monotonic()
+        self.n = 0
+        self.isr0 = rt.stats()["nisr"]
+        self.text: list[str] = []
+
+    def on_finalized_text(self, text: str, stream_end: bool = False):
+        now = time.monotonic()
+        isr = self.rt.stats()["nisr"]
+        if not stream_end:
+            # ONE STREAM, ONE LINE PER TOKEN.  The obvious shape — text on stdout,
+            # timing on stderr — interleaves wrongly the moment the output is piped,
+            # because stdout goes block-buffered there and stderr does not.  A token
+            # that appears four tokens late is worse than no streaming at all.
+            self.n += 1
+            sys.stdout.write(f"{text!r:>18}   [{self.n:>3}  {now - self.tlast:5.2f}s"
+                             f"  {isr - self.isr0:>7} ISR]\n")
+            sys.stdout.flush()
+            self.text.append(text)
+        else:
+            total = now - self.t0
+            print(f"\n{''.join(self.text)}\n", flush=True)
+            print(f"  {self.n} tokens in {total:.2f} s  "
+                  f"({self.n / total if total else 0:.2f} tok/s)", flush=True)
+        self.tlast, self.isr0 = now, isr
 
 
 class PimLinear(nn.Module):
@@ -155,13 +195,22 @@ class PimModel:
         self.cache = PimCache(self.rt, self.shape.layers, s_max)
 
     # ------------------------------------------------------------------------
-    def generate(self, prompt: str, max_new_tokens: int = 32, **kw) -> str:
+    def generate(self, prompt: str, max_new_tokens: int = 32, stream: bool = True,
+                 **kw) -> str:
+        """Generate, printing each token as it lands.
+
+        STREAMING IS NOT A NICETY HERE.  A token takes seconds, so a run that
+        printed nothing until the end would be indistinguishable from a hang for
+        minutes at a time — and the per-token rate is the number you actually want
+        to see, because it is what says whether the card or the host is the limit.
+        """
         ids = self.tokenizer(prompt, return_tensors="pt")
         self.cache.reset()
+        streamer = TimedStreamer(self.tokenizer, self.rt) if stream else None
         with torch.no_grad():
             out = self.model.generate(
                 **ids, max_new_tokens=max_new_tokens, do_sample=False,
-                past_key_values=self.cache, use_cache=True, **kw)
+                past_key_values=self.cache, use_cache=True, streamer=streamer, **kw)
         return self.tokenizer.decode(out[0], skip_special_tokens=True)
 
     def free(self) -> None:

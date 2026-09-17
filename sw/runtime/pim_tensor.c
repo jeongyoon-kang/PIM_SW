@@ -235,13 +235,24 @@ const char *pim_tensor_upload(pim_ctx *c, pim_tensor *t, const void *src)
 
     if (!c || !t || !t->base || !src) return "pim_tensor_upload: null argument";
 
-    // THE PADDING IS NOT WRITTEN, IT IS CLEARED FIRST.  Walking the padded
-    // rectangle with a zero-extended host copy would need a staging buffer the size
-    // of the tensor.  Clearing the whole allocation and then writing only the real
-    // rectangle costs one extra pass and no host memory — and the pass is the same
-    // DMA the caller would have paid inside the staging copy anyway.
-    r = (struct rect){ 0, t->noutpad, 0, t->nredpad };
-    if ((bad = scatter(c, t, &r, NULL, 0))) return bad;
+    // THE PADDING IS CLEARED, AND ONLY THE PADDING.  Zero-extending on the host
+    // would need a staging buffer the size of the tensor, so the zeros are written
+    // separately — but as the two rectangles that ARE padding, not as a pass over
+    // the whole allocation followed by an overwrite.
+    //
+    // That distinction is most of the upload.  A transformer's weights have no
+    // padding at all: every out_features is a multiple of the supergroup and every
+    // in_features a multiple of a beat, so both rectangles below are empty and the
+    // clear costs nothing.  Clearing everything first would have doubled the DMA for
+    // six gigabytes of weights to zero bytes that are about to be overwritten.
+    if (t->noutpad > t->nout) {                     /* whole padded output rows */
+        r = (struct rect){ t->nout, t->noutpad - t->nout, 0, t->nredpad };
+        if ((bad = scatter(c, t, &r, NULL, 0))) return bad;
+    }
+    if (t->nredpad > t->nred) {                     /* the beat tail of real rows */
+        r = (struct rect){ 0, t->nout, t->nred, t->nredpad - t->nred };
+        if ((bad = scatter(c, t, &r, NULL, 0))) return bad;
+    }
 
     r = (struct rect){ 0, t->nout, 0, t->nred };
     bad = scatter(c, t, &r, (const uint16_t *)src,
