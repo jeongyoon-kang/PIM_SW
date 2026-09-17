@@ -52,8 +52,10 @@
 //     poisons its bank's whole accumulation: +Inf, -Inf and NaN each turned 32 of
 //     32 outputs into NaN in the same measurement, again on either side.  So
 //     zeroing one side is enough for garbage that is merely large and is NOT enough
-//     for garbage that is uninitialised — which is the case that matters, since an
-//     unwritten lane's exponent field is all ones about 0.8% of the time.
+//     for garbage that is uninitialised — which is the case that matters.  (An
+//     all-ones exponent field is 256 of 65536 patterns, but unwritten DRAM is not
+//     uniform noise; the reason to zero is that its contents are unknown and one
+//     Inf is enough.)
 //
 //     pim_weight_upload memsets its staging block and pim_gemv's vector staging
 //     memsets before copying, so both sides are covered here regardless.

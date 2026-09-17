@@ -86,10 +86,14 @@
  * zero multiplier is the IEEE special: 0 * Inf is NaN, and one NaN poisons its
  * bank's entire accumulation.
  *
- * THE INVARIANT STANDS, for that reason instead.  Uninitialised DRAM decodes as
- * Inf or NaN whenever a lane's exponent field happens to be all ones — 512 of the
- * 65536 bit patterns, so about 0.8% of lanes.  Fifteen tail lanes across a
- * thousand banks means it is not a corner case, it is a certainty.
+ * THE INVARIANT STANDS, for that reason instead.  A BF16 lane is Inf or NaN when
+ * its exponent field is all ones: 256 of the 65536 patterns.  But the argument does
+ * not rest on that ratio, because unwritten DRAM is not uniform — it holds whatever
+ * the last user left.  It rests on the shape of the failure.  V's reduction axis is
+ * the SEQUENCE, so fifteen times in sixteen the final beat straddles the frontier,
+ * on every head of every layer of every token; one NaN takes its bank's whole
+ * accumulation, and o_proj spreads that across the entire layer output.  You cannot
+ * know what is there and once is enough.
  *
  * So a RED_MAJOR tensor carries an invariant:
  *

@@ -101,7 +101,9 @@ const char *pim_gemv_verify(pim_ctx *c, const pim_tensor *w, const uint16_t *W,
  * THE EXCEPTION IS THE IEEE SPECIAL, and it is the one that happens.  0 * Inf is
  * NaN, and one NaN poisons its bank's entire accumulation — +Inf and NaN each
  * turned 32 of 32 outputs into NaN.  An uninitialised GPR word decodes as one of
- * those whenever a lane's exponent field is all ones, about 0.8% of bit patterns.
+ * those whenever a lane's exponent field is all ones — 256 of 65536 patterns — and
+ * the GPR is not uniform noise either, so the reason to zero is simply that its
+ * contents are unknown and one Inf is enough.
  *
  * ZEROING IS THEREFORE STILL THE CONTRACT (pim_mac_exact.c, precondition 1) — not
  * because a large lane would drown the real ones, but because an uninitialised one

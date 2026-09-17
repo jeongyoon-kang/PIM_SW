@@ -150,9 +150,11 @@ const pim_geometry *pim_geom(void);
  * Measured on the ch2 image (runtime/test/tensor_board): a tail lane of 1.5e18, or
  * even the largest finite BF16, changes NO output — the zero beside it wins.  But
  * +Inf, -Inf and NaN each turn EVERY output of their bank into NaN, because 0 * Inf
- * is NaN and one NaN poisons the accumulation it joins.  Uninitialised DRAM decodes
- * as one of those whenever a lane's exponent field is all ones, which is about 0.8%
- * of bit patterns — a certainty across a KV cache, not a corner case. */
+ * is NaN and one NaN poisons the accumulation it joins.  A BF16 lane is Inf or NaN
+ * when its exponent field is all ones — 256 of 65536 patterns — but the reason to
+ * clear is not that ratio, since unwritten DRAM holds whatever the last user left
+ * rather than uniform noise.  It is that you cannot know what is there, one is
+ * enough, and a V cache reads past its frontier on every head of every token. */
 #define PIM_ALLOC_F_ZERO    0x1u
 
 /* RESERVED, AND REFUSED TODAY.  It would mean "granules at consecutive PIM
