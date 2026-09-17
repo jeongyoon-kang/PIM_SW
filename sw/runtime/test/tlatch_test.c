@@ -89,7 +89,7 @@ int main(int argc, char **argv)
 
     const pim_geometry *g = pim_geom_ctx(c);
     uint32_t n = g->nbank * g->nch * groups;
-    pim_gemv_w w;
+    pim_tensor w;
     if ((bad = pim_gemv_alloc(c, n, k, &w))) { printf("alloc: %s\n", bad); return 1; }
 
     printf("%u ch x %u bank -> %u outputs per supergroup\n", g->nch, g->nbank,
@@ -100,7 +100,7 @@ int main(int argc, char **argv)
     uint16_t *W  = malloc((size_t)n * k * 2), *x = malloc((size_t)k * 2);
     uint16_t *y1 = malloc((size_t)n * 2), *y2 = malloc((size_t)n * 2);
     uint16_t *gold = malloc((size_t)n * 2);
-    void *xg = pim_alloc_ctx(c, (size_t)w.kpad * 2, PIM_MEM_GPR);
+    void *xg = pim_alloc_ctx(c, (size_t)w.nredpad * 2, PIM_MEM_GPR);
     void *yg = pim_alloc_ctx(c, (size_t)w.ngroups * g->nch * 32, PIM_MEM_GPR);
     if (!W || !x || !y1 || !y2 || !gold || !xg || !yg) {
         printf("allocation: %s\n", pim_last_error_ctx(c)); return 1; }
@@ -165,7 +165,7 @@ int main(int argc, char **argv)
     }
     printf("\n\n%s\n", fail ? "FAIL" : "all checks passed");
 
-    pim_free_ctx(c, yg); pim_free_ctx(c, xg); pim_gemv_free(c, &w);
+    pim_free_ctx(c, yg); pim_free_ctx(c, xg); pim_tensor_free(c, &w);
     pim_exec_close(e); pim_close(c);
     return fail != 0;
 }

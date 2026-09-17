@@ -34,20 +34,20 @@ static int fail;
 #define CHECK(cond, ...) do{ if(!(cond)){ printf("  FAIL: "); printf(__VA_ARGS__); \
                                           printf("\n"); fail++; } }while(0)
 
-// A GEMV shape's weight allocation.  THE TILING COMES FROM pim_gemv_plan(), not from
+// A GEMV shape's weight allocation.  THE TILING COMES FROM pim_tensor_plan(), PIM_LAYOUT_OUT_MAJOR, not from
 // a copy of its arithmetic — a test that re-derives what it is testing would agree
 // with itself and with nothing else.
-static const char *plan(pim_ctx *c, uint32_t n, uint32_t k, pim_gemv_w *w)
+static const char *plan(pim_ctx *c, uint32_t n, uint32_t k, pim_tensor *w)
 {
     const pim_geometry *g = pim_geom_ctx(c);
 
-    pim_gemv_plan(g, n, k, w);
-    w->w = pim_alloc_ctx(c, pim_gemv_bytes(g, w), PIM_MEM_DRAM);
-    if (!w->w) return "weight allocation failed";
+    pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, n, k, w);
+    w->base = pim_alloc_ctx(c, pim_tensor_bytes(g, w), PIM_MEM_DRAM);
+    if (!w->base) return "weight allocation failed";
     // pim_gemv_upload() stamps this after the transfer; there is no transfer here
     // (the fds are -1), so the test stamps it the same way.  Doing it by hand is
     // the point of the refusal check further down.
-    return pim_tag_set_ctx(c, w->w, pim_gemv_tag(g, w));
+    return pim_tag_set_ctx(c, w->base, pim_tensor_tag(g, w));
 }
 
 // ------------------------------------------------------------------------------
@@ -57,7 +57,7 @@ static void compare(pim_ctx *c, uint32_t n, uint32_t k, pim_acc_mode mode,
                     const char *what)
 {
     const pim_geometry *g = pim_geom_ctx(c);
-    pim_gemv_w  w;
+    pim_tensor  w;
     const char *bad;
     void       *xg, *yg;
     size_t      xb, yb;
@@ -77,7 +77,7 @@ static void compare(pim_ctx *c, uint32_t n, uint32_t k, pim_acc_mode mode,
 
     // The GPR operands, sized the way pim_gemv_gpr_bytes would for one launch of
     // the whole thing.
-    xb = (size_t)w.kpad * 2;
+    xb = (size_t)w.nredpad * 2;
     yb = (size_t)w.ngroups * g->nch * 32;
     xg = pim_alloc_ctx(c, xb, PIM_MEM_GPR);
     yg = pim_alloc_ctx(c, yb, PIM_MEM_GPR);
@@ -112,7 +112,7 @@ static void compare(pim_ctx *c, uint32_t n, uint32_t k, pim_acc_mode mode,
     rows = calloc((size_t)w.ngroups * w.nchunks, sizeof *rows);
     for (uint32_t u = 0; u < w.ngroups * w.nchunks; u++) {
         pim_unit un;
-        bad = pim_addr_unit_ctx(c, w.w, (size_t)w.ngroups * w.nchunks * g->unit_bytes,
+        bad = pim_addr_unit_ctx(c, w.base, (size_t)w.ngroups * w.nchunks * g->unit_bytes,
                                 u, &un);
         CHECK(!bad, "pim_addr_unit(%u): %s", u, bad ? bad : "");
         if (bad) return;
@@ -180,7 +180,7 @@ static void compare(pim_ctx *c, uint32_t n, uint32_t k, pim_acc_mode mode,
         printf("  %u accumulation region(s), each ending on its RD_MAC\n", natom);
     }
 
-    pim_free_ctx(c, xg); pim_free_ctx(c, yg); pim_free_ctx(c, w.w);
+    pim_free_ctx(c, xg); pim_free_ctx(c, yg); pim_free_ctx(c, w.base);
     free(si); free(sr); free(sa); free(sl); free(so); free(rows);
 }
 
@@ -244,17 +244,17 @@ int main(void)
     check_refusals(c);
 
     {   /* an allocation nobody stamped, and one stamped for another shape */
-        pim_gemv_w wa, wb;  pim_isr i4[64];  pim_ref r4[64];  pim_atom a4[8];
+        pim_tensor wa, wb;  pim_isr i4[64];  pim_ref r4[64];  pim_atom a4[8];
         pim_isr o4[128]; pim_prog p4; pim_logical l4;
         void *x4, *y4;  const char *bad;
 
-        pim_gemv_plan(g, 64, 1024, &wa);
-        wa.w = pim_alloc_ctx(c, pim_gemv_bytes(g, &wa), PIM_MEM_DRAM);   /* 표식 없음 */
-        x4 = pim_alloc_ctx(c, wa.kpad * 2, PIM_MEM_GPR);
+        pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, 64, 1024, &wa);
+        wa.base = pim_alloc_ctx(c, pim_tensor_bytes(g, &wa), PIM_MEM_DRAM);   /* 표식 없음 */
+        x4 = pim_alloc_ctx(c, wa.nredpad * 2, PIM_MEM_GPR);
         pim_tag_set_ctx(c, x4, pim_gemv_xtag(&wa));
         y4 = pim_alloc_ctx(c, wa.ngroups * g->nch * 32, PIM_MEM_GPR);
         pim_logical_init(&l4, i4, 64, r4, 64, a4, 8, g->nch, 1);
-        pim_gemv_logical(g, &wa, 0, wa.ngroups, x4, wa.kpad * 2,
+        pim_gemv_logical(g, &wa, 0, wa.ngroups, x4, wa.nredpad * 2,
                          y4, wa.ngroups * g->nch * 32, PIM_ACC_SINGLE, &l4);
         pim_prog_init(&p4, o4, 128);
         bad = pim_prog_lower_ctx(c, &l4, &p4, 0);
@@ -262,52 +262,52 @@ int main(void)
         if (bad) printf("  unstamped weight allocation -> refused\n     \"%.66s...\"\n", bad);
 
         /* now stamp it for a DIFFERENT shape */
-        pim_gemv_plan(g, 64, 2048, &wb);
-        pim_tag_set_ctx(c, wa.w, pim_gemv_tag(g, &wb));
+        pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, 64, 2048, &wb);
+        pim_tag_set_ctx(c, wa.base, pim_tensor_tag(g, &wb));
         bad = pim_prog_lower_ctx(c, &l4, &p4, 0);
         CHECK(bad != NULL, "a weight allocation laid out for another shape was accepted");
         if (bad) printf("  stamped for another shape -> refused\n     \"%.66s...\"\n", bad);
 
-        pim_tag_set_ctx(c, wa.w, pim_gemv_tag(g, &wa));
+        pim_tag_set_ctx(c, wa.base, pim_tensor_tag(g, &wa));
         pim_prog_init(&p4, o4, 128);
         CHECK(!pim_prog_lower_ctx(c, &l4, &p4, 0), "the correct stamp was rejected");
-        pim_free_ctx(c, x4); pim_free_ctx(c, y4); pim_free_ctx(c, wa.w);
+        pim_free_ctx(c, x4); pim_free_ctx(c, y4); pim_free_ctx(c, wa.base);
     }
 
     {   /* a vector buffer nobody padded */
-        pim_gemv_w w5;  pim_isr i5[64];  pim_ref r5[64];  pim_atom a5[8];
+        pim_tensor w5;  pim_isr i5[64];  pim_ref r5[64];  pim_atom a5[8];
         pim_isr o5[128]; pim_prog p5; pim_logical l5;
         void *x5, *y5;  const char *bad;
 
-        pim_gemv_plan(g, 32, 1000, &w5);          /* k=1000 -> kpad 1008: 8 lane 이 패딩 */
-        w5.w = pim_alloc_ctx(c, pim_gemv_bytes(g, &w5), PIM_MEM_DRAM);
-        pim_tag_set_ctx(c, w5.w, pim_gemv_tag(g, &w5));
-        x5 = pim_alloc_ctx(c, w5.kpad * 2, PIM_MEM_GPR);      /* 표식 없음 */
+        pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, 32, 1000, &w5);          /* k=1000 -> nredpad 1008: 8 lane 이 패딩 */
+        w5.base = pim_alloc_ctx(c, pim_tensor_bytes(g, &w5), PIM_MEM_DRAM);
+        pim_tag_set_ctx(c, w5.base, pim_tensor_tag(g, &w5));
+        x5 = pim_alloc_ctx(c, w5.nredpad * 2, PIM_MEM_GPR);      /* 표식 없음 */
         y5 = pim_alloc_ctx(c, w5.ngroups * g->nch * 32, PIM_MEM_GPR);
         pim_logical_init(&l5, i5, 64, r5, 64, a5, 8, g->nch, 1);
-        pim_gemv_logical(g, &w5, 0, w5.ngroups, x5, w5.kpad * 2,
+        pim_gemv_logical(g, &w5, 0, w5.ngroups, x5, w5.nredpad * 2,
                          y5, w5.ngroups * g->nch * 32, PIM_ACC_SINGLE, &l5);
         pim_prog_init(&p5, o5, 128);
         bad = pim_prog_lower_ctx(c, &l5, &p5, 0);
         CHECK(bad != NULL, "an unpadded vector buffer was accepted");
         if (bad) printf("  unpadded vector buffer -> refused\n     \"%.66s...\"\n", bad);
-        pim_free_ctx(c, x5); pim_free_ctx(c, y5); pim_free_ctx(c, w5.w);
+        pim_free_ctx(c, x5); pim_free_ctx(c, y5); pim_free_ctx(c, w5.base);
     }
 
     {   /* a DUAL schedule lowered without evidence must be refused */
-        pim_gemv_w w2;  pim_isr i3[64];  pim_ref r3[64];  pim_atom a3[8];
+        pim_tensor w2;  pim_isr i3[64];  pim_ref r3[64];  pim_atom a3[8];
         pim_isr o3[128]; pim_prog p3; pim_logical l3;
         void *x3, *y3;  const char *bad;
 
         printf("\n");
-        pim_gemv_plan(g, 64, 1024, &w2);
-        w2.w = pim_alloc_ctx(c, pim_gemv_bytes(g, &w2), PIM_MEM_DRAM);
-        pim_tag_set_ctx(c, w2.w, pim_gemv_tag(g, &w2));
-        x3 = pim_alloc_ctx(c, w2.kpad * 2, PIM_MEM_GPR);
+        pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, 64, 1024, &w2);
+        w2.base = pim_alloc_ctx(c, pim_tensor_bytes(g, &w2), PIM_MEM_DRAM);
+        pim_tag_set_ctx(c, w2.base, pim_tensor_tag(g, &w2));
+        x3 = pim_alloc_ctx(c, w2.nredpad * 2, PIM_MEM_GPR);
         pim_tag_set_ctx(c, x3, pim_gemv_xtag(&w2));
         y3 = pim_alloc_ctx(c, w2.ngroups * g->nch * 32, PIM_MEM_GPR);
         pim_logical_init(&l3, i3, 64, r3, 64, a3, 8, g->nch, 2);
-        pim_gemv_logical(g, &w2, 0, w2.ngroups, x3, w2.kpad * 2,
+        pim_gemv_logical(g, &w2, 0, w2.ngroups, x3, w2.nredpad * 2,
                          y3, w2.ngroups * g->nch * 32, PIM_ACC_DUAL, &l3);
         pim_prog_init(&p3, o3, 128);
         bad = pim_prog_lower_ctx(c, &l3, &p3, 0);
@@ -316,7 +316,7 @@ int main(void)
         pim_prog_init(&p3, o3, 128);
         CHECK(!pim_prog_lower_ctx(c, &l3, &p3, PIM_LOWER_ALLOW_T),
               "PIM_LOWER_ALLOW_T did not let it through");
-        pim_free_ctx(c, x3); pim_free_ctx(c, y3); pim_free_ctx(c, w2.w);
+        pim_free_ctx(c, x3); pim_free_ctx(c, y3); pim_free_ctx(c, w2.base);
     }
 
     printf("\n%s\n", fail ? "FAILED" : "all checks passed");

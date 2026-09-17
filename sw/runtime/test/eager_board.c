@@ -4,8 +4,8 @@
 // permuting one, and a GEMV built on it is bit-exact.
 //
 // lib/test/eager_test proves the ARITHMETIC: for k <= one row buffer, the device
-// offset of every element equals its linear index in a [npad][1024] host array.
-// That is a statement about pim_gemv_offset(), and pim_gemv_offset() is also what
+// offset of every element equals its linear index in a [noutpad][1024] host array.
+// That is a statement about pim_tensor_offset(), and pim_tensor_offset() is also what
 // the permuting upload uses — so a bug shared by both would pass it.
 //
 // This asks the card instead, and in two independent ways:
@@ -57,7 +57,7 @@ int main(int argc, char **argv)
     pim_ctx  *c = NULL;
     pim_exec *e = NULL;
     const pim_geometry *g;
-    pim_gemv_w  wa, wb, wc;
+    pim_tensor  wa, wb, wc;
     const char *bad;
     uint32_t    n = 2048, k = 1024;
     uint16_t   *W, *padded, *rowbuf, *x, *y, *golden, *ba, *bb, *bc;
@@ -81,16 +81,16 @@ int main(int argc, char **argv)
     pim_exec_clear_violations(e);
     g = pim_geom_ctx(c);
 
-    pim_gemv_plan(g, n, k, &wa);
+    pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, n, k, &wa);
     if (!pim_gemv_is_eager(&wa)) {
         printf("  k=%u needs %u chunks; the eager form wants k <= %u\n",
                k, wa.nchunks, pim_gemv_host_stride(&wa));
         return 1;
     }
     wb = wa;  wc = wa;
-    nbytes = pim_gemv_bytes(g, &wa);
-    printf("  %u ch x %u bank   n=%u k=%u -> npad %u, OPSIZE %u, %zu KiB each\n",
-           g->nch, g->nbank, n, k, wa.npad, wa.last_beats, nbytes >> 10);
+    nbytes = pim_tensor_bytes(g, &wa);
+    printf("  %u ch x %u bank   n=%u k=%u -> noutpad %u, OPSIZE %u, %zu KiB each\n",
+           g->nch, g->nbank, n, k, wa.noutpad, wa.last_beats, nbytes >> 10);
 
     // Scrub before anything: the latch outlives processes.
     {
@@ -107,20 +107,20 @@ int main(int argc, char **argv)
     pim_gemv_pack_eager(&wa, W, padded);
 
     // beat-padded but NOT row-padded: what the row form wants
-    rowbuf = calloc((size_t)wa.n * wa.kpad, 2);
-    for (uint32_t j = 0; j < wa.n; j++)
-        memcpy(rowbuf + (size_t)j * wa.kpad, W + (size_t)j * k, (size_t)k * 2);
+    rowbuf = calloc((size_t)wa.nout * wa.nredpad, 2);
+    for (uint32_t j = 0; j < wa.nout; j++)
+        memcpy(rowbuf + (size_t)j * wa.nredpad, W + (size_t)j * k, (size_t)k * 2);
 
-    wa.w = pim_alloc_ctx(c, nbytes, PIM_MEM_DRAM);
-    wb.w = pim_alloc_ctx(c, nbytes, PIM_MEM_DRAM);
-    wc.w = pim_alloc_ctx(c, nbytes, PIM_MEM_DRAM);
-    if (!wa.w || !wb.w || !wc.w) { printf("  alloc: %s\n", pim_last_error_ctx(c)); return 1; }
+    wa.base = pim_alloc_ctx(c, nbytes, PIM_MEM_DRAM);
+    wb.base = pim_alloc_ctx(c, nbytes, PIM_MEM_DRAM);
+    wc.base = pim_alloc_ctx(c, nbytes, PIM_MEM_DRAM);
+    if (!wa.base || !wb.base || !wc.base) { printf("  alloc: %s\n", pim_last_error_ctx(c)); return 1; }
 
-    // The row form does not write rows n..npad-1, so poison the whole allocation
+    // The row form does not write rows n..noutpad-1, so poison the whole allocation
     // first: if a MAC ever read one of them the answer would change, and this is
     // what makes "never read" a claim the test can back rather than assume.
     memset(padded, 0xA5, nbytes);
-    if ((bad = pim_memcpy_ctx(c, wc.w, padded, nbytes, PIM_TO_DEV, 0))) {
+    if ((bad = pim_memcpy_ctx(c, wc.base, padded, nbytes, PIM_TO_DEV, 0))) {
         printf("  poison: %s\n", bad); return 1;
     }
     pim_gemv_pack_eager(&wa, W, padded);
@@ -142,12 +142,12 @@ int main(int argc, char **argv)
     printf("     one DMA     1 pwrite of %8zu B                  %6llu us\n",
            nbytes, (unsigned long long)t_eager);
     printf("     per row     %u pwrites of %6zu B                %6llu us\n",
-           wa.n, (size_t)wa.kpad * 2, (unsigned long long)t_rows);
+           wa.nout, (size_t)wa.nredpad * 2, (unsigned long long)t_rows);
 
     ba = malloc(nbytes);  bb = malloc(nbytes);  bc = malloc(nbytes);
-    if ((bad = pim_memcpy_ctx(c, ba, wa.w, nbytes, PIM_FROM_DEV, 0)) ||
-        (bad = pim_memcpy_ctx(c, bb, wb.w, nbytes, PIM_FROM_DEV, 0)) ||
-        (bad = pim_memcpy_ctx(c, bc, wc.w, nbytes, PIM_FROM_DEV, 0))) {
+    if ((bad = pim_memcpy_ctx(c, ba, wa.base, nbytes, PIM_FROM_DEV, 0)) ||
+        (bad = pim_memcpy_ctx(c, bb, wb.base, nbytes, PIM_FROM_DEV, 0)) ||
+        (bad = pim_memcpy_ctx(c, bc, wc.base, nbytes, PIM_FROM_DEV, 0))) {
         printf("  readback: %s\n", bad); return 1;
     }
     printf("\n  1. what actually landed, %zu B read back from each\n", nbytes);
@@ -160,28 +160,28 @@ int main(int argc, char **argv)
         else       printf("     permuting == one DMA   : all %zu elements\n", nbytes / 2);
     }
     {   // The row form is compared only where it WROTE: rows 0..n-1, elements
-        // 0..kpad-1.  Everywhere else it deliberately left the poison, and saying
+        // 0..nredpad-1.  Everywhere else it deliberately left the poison, and saying
         // so is the point rather than a caveat.
         size_t nbad = 0, npois = 0;
         uint32_t stride_el = g->row_bytes / 2;
-        for (uint32_t j = 0; j < wa.n; j++)
-            for (uint32_t i = 0; i < wa.kpad; i++)
+        for (uint32_t j = 0; j < wa.nout; j++)
+            for (uint32_t i = 0; i < wa.nredpad; i++)
                 if (bc[(size_t)j * stride_el + i] != ba[(size_t)j * stride_el + i]) nbad++;
-        for (uint32_t j = 0; j < wa.n; j++)
-            for (uint32_t i = wa.kpad; i < stride_el; i++)
+        for (uint32_t j = 0; j < wa.nout; j++)
+            for (uint32_t i = wa.nredpad; i < stride_el; i++)
                 if (bc[(size_t)j * stride_el + i] == 0xA5A5) npois++;
         if (nbad) { printf("     FAIL per-row: %zu of the written elements differ\n", nbad); fail++; }
         else       printf("     per row   == permuting : all %zu written elements\n",
-                          (size_t)wa.n * wa.kpad);
+                          (size_t)wa.nout * wa.nredpad);
         printf("     and %zu untouched element(s) still hold the poison, as intended\n",
                npois);
     }
 
     // ---- 2. and a GEMV on the eager one is bit-exact ------------------------
-    x  = malloc((size_t)wa.kpad * 2);
+    x  = malloc((size_t)wa.nredpad * 2);
     y  = malloc((size_t)n * 2);
     golden = malloc((size_t)n * 2);
-    memset(x, 0, (size_t)wa.kpad * 2);
+    memset(x, 0, (size_t)wa.nredpad * 2);
     for (uint32_t i = 0; i < k; i++) x[i] = rnd_bf16();
 
     pim_gemv_gpr_bytes(&wb, PIM_ACC_SINGLE, pim_exec_max_isrs(e), &xb, &yb);
@@ -192,7 +192,7 @@ int main(int argc, char **argv)
     pim_gemv_golden(W, n, k, x, golden);
     printf("\n  2. a GEMV on each\n");
     {
-        pim_gemv_w *which[2] = { &wb, &wc };
+        pim_tensor *which[2] = { &wb, &wc };
         const char *name[2]  = { "one DMA", "per row " };
         for (int t = 0; t < 2; t++) {
             uint32_t nbad = 0, first = 0;
@@ -219,7 +219,7 @@ int main(int argc, char **argv)
     }
 
     pim_free_ctx(c, xg); pim_free_ctx(c, yg);
-    pim_gemv_free(c, &wa); pim_gemv_free(c, &wb); pim_gemv_free(c, &wc);
+    pim_tensor_free(c, &wa); pim_tensor_free(c, &wb); pim_tensor_free(c, &wc);
     free(W); free(padded); free(rowbuf); free(ba); free(bb); free(bc); free(x); free(y); free(golden);
     pim_exec_close(e); pim_close(c);
 

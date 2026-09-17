@@ -76,15 +76,15 @@ static pim_geometry mk(uint32_t nch)
     return g;
 }
 
-static pim_gemv_w mkw(const pim_geometry *g, uint32_t groups, uint32_t k)
+static pim_tensor mkw(const pim_geometry *g, uint32_t groups, uint32_t k)
 {
-    pim_gemv_w w = {0};
-    w.n = g->nbank * g->nch * groups;
-    w.npad = w.n;
-    w.k = k;
-    w.kpad = (k + 15) / 16 * 16;
-    w.nchunks = (w.kpad + 1023) / 1024;
-    w.last_beats = (w.kpad - (w.nchunks - 1) * 1024) / 16;
+    pim_tensor w = {0};
+    w.nout = g->nbank * g->nch * groups;
+    w.noutpad = w.nout;
+    w.nred = k;
+    w.nredpad = (k + 15) / 16 * 16;
+    w.nchunks = (w.nredpad + 1023) / 1024;
+    w.last_beats = (w.nredpad - (w.nchunks - 1) * 1024) / 16;
     w.ngroups = groups;
     w.nch = g->nch;
     w.nbank = g->nbank;
@@ -94,16 +94,16 @@ static pim_gemv_w mkw(const pim_geometry *g, uint32_t groups, uint32_t k)
 static void phase0(uint32_t nch, uint32_t groups, uint32_t k)
 {
     pim_geometry g = mk(nch);
-    pim_gemv_w  ww = mkw(&g, groups, k);
+    pim_tensor  ww = mkw(&g, groups, k);
     uint64_t span = (uint64_t)ww.ngroups * ww.nchunks * g.unit_bytes;
     uint64_t collisions = 0, misdecoded = 0, overrun = 0;
     unsigned char *hit = calloc(span / 2, 1);   // one byte per BF16 slot
 
     if (!hit) { printf("  (out of memory)\n"); fail++; return; }
 
-    for (uint32_t j = 0; j < ww.n; j++)
+    for (uint32_t j = 0; j < ww.nout; j++)
         for (uint32_t i = 0; i < k; i++) {
-            uint64_t off = pim_gemv_offset(&g, &ww, j, i);
+            uint64_t off = pim_tensor_offset(&g, &ww, j, i);
             pim_coord co;
 
             if (off + 2 > span) { overrun++; continue; }
@@ -124,7 +124,7 @@ static void phase0(uint32_t nch, uint32_t groups, uint32_t k)
 
     printf("  ch%u g%-2u k=%-5u  n=%-4u units=%-3u span=%-9"PRIu64" "
            "collisions %"PRIu64", mis-decoded %"PRIu64", overrun %"PRIu64"\n",
-           nch, groups, k, ww.n, ww.ngroups * ww.nchunks, span,
+           nch, groups, k, ww.nout, ww.ngroups * ww.nchunks, span,
            collisions, misdecoded, overrun);
     CHECK(!collisions, "two weights share a byte");
     CHECK(!misdecoded, "a weight decodes to the wrong (row, ch, bank, col)");
@@ -171,7 +171,7 @@ static void phase0_program(uint32_t nch, uint32_t groups, uint32_t k,
                            pim_acc_mode mode)
 {
     pim_geometry g = mk(nch);
-    pim_gemv_w   w = mkw(&g, groups, k);
+    pim_tensor   w = mkw(&g, groups, k);
     uint32_t    *rows;
     pim_isr     *storage;
     pim_prog     prog;
@@ -264,7 +264,7 @@ static void phase0_program(uint32_t nch, uint32_t groups, uint32_t k,
 static void phase0_verifier(void)
 {
     pim_geometry g = mk(2);
-    pim_gemv_w   w = mkw(&g, 1, 2048);
+    pim_tensor   w = mkw(&g, 1, 2048);
     uint32_t rows[2] = { 40, 41 };
     pim_isr  storage[64];
     pim_prog prog;
@@ -298,7 +298,7 @@ static void phase0_verifier(void)
     // A MAC whose OPSIZE does not match the WRVEC that filled the GB.  Rebuild with
     // a short last chunk and then lengthen its MAC.
     {
-        pim_gemv_w s = w;
+        pim_tensor s = w;
         s = mkw(&g, 1, 1500);
         pim_prog_init(&prog, storage, sizeof storage / sizeof *storage);
         if (pim_gemv_program(&g, &s, 0, s.ngroups, 1000, 5000, rows, PIM_ACC_SINGLE, &prog)) { fail++; return; }
@@ -317,7 +317,7 @@ static void phase0_verifier(void)
 static int run_one(pim_ctx *c, pim_exec *e, uint32_t n, uint32_t k,
                    pim_acc_mode mode)
 {
-    pim_gemv_w w;
+    pim_tensor w;
     size_t xb, yb;
     uint16_t *W = NULL, *x = NULL, *y = NULL, *gold = NULL;
     void *xg = NULL, *yg = NULL;
@@ -327,7 +327,7 @@ static int run_one(pim_ctx *c, pim_exec *e, uint32_t n, uint32_t k,
     int rc = 1;
 
     if ((bad = pim_gemv_alloc(c, n, k, &w))) { printf("  alloc: %s\n", bad); return 1; }
-    // The caller no longer derives these; getting kpad*2 or groups*nch*32 wrong
+    // The caller no longer derives these; getting nredpad*2 or groups*nch*32 wrong
     // reads back as someone else's data rather than as an error.
     pim_gemv_gpr_bytes(&w, mode, pim_exec_max_isrs(e), &xb, &yb);
 
@@ -361,7 +361,7 @@ static int run_one(pim_ctx *c, pim_exec *e, uint32_t n, uint32_t k,
         }
     printf("  n=%-6u k=%-5u -> pad %ux%u, %u grp x %u chunk | %4u ISR %4u WRVEC "
            "%2u launch %7.1f us | %u/%u exact\n",
-           n, k, w.npad, w.kpad, w.ngroups, w.nchunks, st.nisr, st.nwrvec,
+           n, k, w.noutpad, w.nredpad, w.ngroups, w.nchunks, st.nisr, st.nwrvec,
            st.nlaunch, (double)st.launch_us, n - wrong, n);
     if (wrong) fail++;
     rc = wrong ? 1 : 0;
@@ -370,7 +370,7 @@ out:
     if (yg) pim_free_ctx(c, yg);
     if (xg) pim_free_ctx(c, xg);
     free(gold); free(y); free(x); free(W);
-    pim_gemv_free(c, &w);
+    pim_tensor_free(c, &w);
     return rc;
 }
 

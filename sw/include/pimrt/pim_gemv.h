@@ -38,34 +38,28 @@
 #include "pim/pim.h"
 #include "pimrt/pim_exec.h"
 #include "pimrt/pim_logical.h"
+#include "pimrt/pim_tensor.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct {
-    void    *w;           /* PIM_MEM_DRAM: ngroups * nchunks broadcast units     */
-    uint32_t n, k;        /* as asked for                                        */
-    uint32_t npad;        /* n rounded up to a whole supergroup                  */
-    uint32_t kpad;        /* k rounded up to a whole beat (16 BF16)              */
-    uint32_t nchunks;     /* ceil(kpad / 1024)                                   */
-    uint32_t last_beats;  /* beats in the final chunk, 1..64                     */
-    uint32_t ngroups;     /* npad / (16 * nch) — supergroups                     */
-    uint32_t nch, nbank;  /* copied from the geometry                            */
-} pim_gemv_w;
+/* THE WEIGHT TENSOR IS A pim_tensor, PIM_LAYOUT_OUT_MAJOR.
+ *
+ * W is [n][k] row-major — torch's nn.Linear.weight order — which is exactly what
+ * OUT_MAJOR means: one output's whole reduction run is contiguous on the host.  So
+ * the shape, the padding, the addressing, the tag and the allocation all come from
+ * pim_tensor.h, and what remains in this header is what is particular to a GEMV:
+ * the three upload strategies, the vector's own contract, and the schedule.
+ *
+ * The names map straight across — n is nout, k is nred, npad is noutpad, kpad is
+ * nredpad — and pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, n, k, &t) replaces
+ * pim_gemv_plan.  ANY n AND ANY k still: n pads to a whole supergroup and k to a
+ * whole beat, both with zeros, and a zero weight contributes exactly 0.0f to a sum
+ * in any order.  That is a statement about the arithmetic, not a tolerance. */
 
-/* ANY n AND ANY k.  Both are padded with ZEROS to what the hardware addresses:
- *
- *   n -> npad,  a whole supergroup (16 * nch outputs).  The padded outputs get zero
- *        weights, compute a zero dot product, and are dropped on the way back.
- *   k -> kpad,  a whole beat (16 BF16).  k is deliberately NOT padded to a whole
- *        1024 — the final chunk carries a shorter OPSIZE instead.
- *
- * Zero weights contribute exactly 0.0f to a sum in any order, so neither padding
- * perturbs a real output — that is a statement about the arithmetic, not a
- * tolerance.  What they cost is memory and a little work: ask npad and nchunks. */
 /* THE TILING DECISION, WITH NOTHING ALLOCATED.  Pure arithmetic on the geometry —
- * no context, no pool, no board.  `out->w` is left NULL; the caller allocates.
+ * no context, no pool, no board.  `out->base` is left NULL; the caller allocates.
  *
  * SPLIT FROM pim_gemv_alloc BECAUSE THE TWO ARE DIFFERENT DECISIONS.  How a shape
  * tiles depends on (n, k, geometry) and is the same in every layer of a model; WHERE
@@ -75,66 +69,28 @@ typedef struct {
  *
  * It is also what lets a shape be planned once and reused: pim_gemv_logical() needs
  * a plan, not an allocation. */
-void        pim_gemv_plan  (const pim_geometry *g, uint32_t n, uint32_t k,
-                            pim_gemv_w *out);
 
 /* Bytes of PIM_MEM_DRAM a planned shape needs. */
-size_t      pim_gemv_bytes (const pim_geometry *g, const pim_gemv_w *w);
 
 /* plan + pim_alloc in one call, for a caller that does not want to own the two
- * steps.  Sets out->w; pim_gemv_free releases it. */
-const char *pim_gemv_alloc (pim_ctx *c, uint32_t n, uint32_t k, pim_gemv_w *out);
-void        pim_gemv_free  (pim_ctx *c, pim_gemv_w *w);
+ * steps.  Sets out->base; pim_tensor_free releases it. */
+const char *pim_gemv_alloc (pim_ctx *c, uint32_t n, uint32_t k, pim_tensor *out);
 
 /* W is [n][k] row-major BF16 — torch's nn.Linear.weight order, so a tensor goes
  * straight in.  Permuted on the host and sent as ONE transfer. */
-const char *pim_gemv_upload(pim_ctx *c, const pim_gemv_w *w, const uint16_t *W);
+const char *pim_gemv_upload(pim_ctx *c, const pim_tensor *w, const uint16_t *W);
 
 /* Read it back through the same window and compare.  Nothing in the hardware
  * protects resident weights, and a corrupted weight is indistinguishable from a bad
  * kernel from the outside. */
-const char *pim_gemv_verify(pim_ctx *c, const pim_gemv_w *w, const uint16_t *W,
+const char *pim_gemv_verify(pim_ctx *c, const pim_tensor *w, const uint16_t *W,
                             uint64_t *n_bad);
 
-/* Where W[j][i] sits inside the weight allocation.
- *
- * PUBLIC ON PURPOSE: this permutation is the part most likely to be wrong and the
- * part a board cannot check cheaply, so a host-only test walks it directly.  It is
- * pure arithmetic and touches nothing.
- *
- *     bank(j) = j % 16     channel(j) = (j/16) % nch     supergroup(j) = j / (16*nch)
- *     unit    = supergroup * nchunks + chunk
- *
- * Every channel of a supergroup uses the SAME (row, col) — the ISA carries one ROW
- * field and CH_MASK is fan-out only — so that part is structural, not a choice. */
-uint64_t pim_gemv_offset(const pim_geometry *g, const pim_gemv_w *w,
-                         uint32_t j, uint32_t i);
-
-/* Which broadcast unit holds output group `group`'s K-chunk `chunk`.
- *
- * THE ONE PLACE THIS FORMULA LIVES, and it is worth a function for a reason that is
- * not tidiness.  It is the contract between where the host PUTS a weight
- * (pim_gemv_offset, at upload) and where a MAC LOOKS for it (the program builders,
- * at launch).  Those are different functions, in different files, running at
- * different times — and if they ever disagree, every MAC reads a row that is not
- * the one its weights are in.  Nothing checks that: not the encoder, not
- * pim_prog_verify, not the hardware.  The result is a number, not an error.
- *
- * Written once, they cannot disagree. */
-static inline uint32_t pim_gemv_unit(const pim_gemv_w *w, uint32_t group,
-                                     uint32_t chunk)
-{ return group * w->nchunks + chunk; }
-
-/* The layout tag pim_gemv_upload() stamps and the program builders assume.  It is a
- * fingerprint of everything that decides WHERE a weight goes: the padded shape and
- * the topology.  Two allocations agree only if a MAC built for one would read the
- * right bytes out of the other. */
-uint64_t pim_gemv_tag(const pim_geometry *g, const pim_gemv_w *w);
 
 /* THE VECTOR HAS A LAYOUT CONTRACT TOO, and it is sharper than the matrix's.
  *
  * A WRVEC reads whole 16-lane beats, and there is no lane mask anywhere on the MAC
- * path.  So the elements from k to kpad are not "unused" — they are multiplied,
+ * path.  So the elements from k to nredpad are not "unused" — they are multiplied,
  * they join their beat's exponent maximum, and a stale one can annihilate every
  * real lane beside it or, if its bytes decode as Inf or NaN, poison the result.
  * ZEROING THEM IS NOT AN OPTIMISATION, IT IS THE CONTRACT (pim_mac_exact.c,
@@ -143,8 +99,8 @@ uint64_t pim_gemv_tag(const pim_geometry *g, const pim_gemv_w *w);
  * pim_gemv_upload_x() pads and stamps; pim_gemv_xtag() is what the WRVECs assume.
  * A GPR buffer filled by a plain pim_memcpy is refused at lowering, because there
  * is no way to tell from the bytes whether the tail was zeroed on purpose. */
-uint64_t    pim_gemv_xtag(const pim_gemv_w *w);
-const char *pim_gemv_upload_x(pim_ctx *c, const pim_gemv_w *w, void *xgpr,
+uint64_t    pim_gemv_xtag(const pim_tensor *w);
+const char *pim_gemv_upload_x(pim_ctx *c, const pim_tensor *w, void *xgpr,
                               const uint16_t *x);
 
 /* ============================== eager all-bank =============================
@@ -165,8 +121,8 @@ const char *pim_gemv_upload_x(pim_ctx *c, const pim_gemv_w *w, void *xgpr,
  * gap — offset j is exactly j row buffers in.
  *
  * SO THE UPLOAD IS ONE pim_memcpy.  No permutation, no staging buffer, and
- * pim_gemv_offset() is not consulted at all.  The allocation and the host array are
- * even the SAME SIZE (npad * 2048 bytes either way).
+ * pim_tensor_offset() is not consulted at all.  The allocation and the host array are
+ * even the SAME SIZE (noutpad * 2048 bytes either way).
  *
  * WHAT IT COSTS, AND WHAT IT DOES NOT.  A row is 1024 elements and k may be far
  * less, so the HOST array carries the same padding the device already had — the
@@ -186,24 +142,24 @@ const char *pim_gemv_upload_x(pim_ctx *c, const pim_gemv_w *w, void *xgpr,
  */
 
 /* Elements per row of the host array — the stride pim_gemv_upload_eager expects. */
-uint32_t pim_gemv_host_stride(const pim_gemv_w *w);
+uint32_t pim_gemv_host_stride(const pim_tensor *w);
 
 /* Whether this shape can use the eager form at all (k <= one row buffer). */
-bool     pim_gemv_is_eager(const pim_gemv_w *w);
+bool     pim_gemv_is_eager(const pim_tensor *w);
 
-/* W is [npad][pim_gemv_host_stride(w)] BF16, row-major.  Sent as one transfer with
- * no permutation, then stamped.  Rows n..npad-1 are never read as outputs and may
+/* W is [noutpad][pim_gemv_host_stride(w)] BF16, row-major.  Sent as one transfer with
+ * no permutation, then stamped.  Rows n..noutpad-1 are never read as outputs and may
  * hold anything. */
-const char *pim_gemv_upload_eager(pim_ctx *c, const pim_gemv_w *w,
+const char *pim_gemv_upload_eager(pim_ctx *c, const pim_tensor *w,
                                   const uint16_t *W);
 
 /* THE OTHER WAY TO SPEND THE SAME PADDING: one transfer PER OUTPUT ROW, carrying
  * only the beats a MAC will read.
  *
- *   pim_gemv_upload_eager   ONE pwrite of npad * 1024 elements.  Moves the row
+ *   pim_gemv_upload_eager   ONE pwrite of noutpad * 1024 elements.  Moves the row
  *                           padding too — for k = 128 that is 8x the real bytes.
- *   pim_gemv_upload_rows    n pwrites of kpad elements each.  Moves only what is
- *                           read, and skips rows n..npad-1 entirely because no
+ *   pim_gemv_upload_rows    n pwrites of nredpad elements each.  Moves only what is
+ *                           read, and skips rows n..noutpad-1 entirely because no
  *                           output is taken from them.
  *
  * MEASURED, ch2, 2026-08-26 (runtime/test/eager_board):
@@ -231,17 +187,17 @@ const char *pim_gemv_upload_eager(pim_ctx *c, const pim_gemv_w *w,
  * identical places, and OPSIZE already covers only ceil(k/16) beats, so no opcode
  * changes — the choice is purely how the bytes get there.
  *
- * W is [n][kpad] BF16, row-major: beat-padded, NOT row-padded.  The tail from k to
- * kpad must be zero for the reason in pim_mac_exact.c's precondition 1; everything
- * past kpad is never read and is not sent. */
-const char *pim_gemv_upload_rows(pim_ctx *c, const pim_gemv_w *w,
+ * W is [n][nredpad] BF16, row-major: beat-padded, NOT row-padded.  The tail from k to
+ * nredpad must be zero for the reason in pim_mac_exact.c's precondition 1; everything
+ * past nredpad is never read and is not sent. */
+const char *pim_gemv_upload_rows(pim_ctx *c, const pim_tensor *w,
                                  const uint16_t *W);
 
 /* Convenience for a caller whose matrix is tight [n][k]: copy it into the padded
  * shape, zeroing what has to be zero.  A caller that already owns its data in the
  * padded layout — a KV cache appended to one row at a time, say — does not need
  * this and should not pay for it. */
-void pim_gemv_pack_eager(const pim_gemv_w *w, const uint16_t *W, uint16_t *out);
+void pim_gemv_pack_eager(const pim_tensor *w, const uint16_t *W, uint16_t *out);
 
 /* ============================== schedules =================================
  * WHAT THE SECOND ACCUMULATOR LATCH IS FOR.
@@ -310,7 +266,7 @@ typedef struct {
  * pulled out of the fetch path for timing and has not come back — so being able to
  * walk the words on a host, with no card and no module, is worth a separate entry
  * point.  pim_gemv() resolves the coordinates and calls this. */
-const char *pim_gemv_program(const pim_geometry *g, const pim_gemv_w *w,
+const char *pim_gemv_program(const pim_geometry *g, const pim_tensor *w,
                              uint32_t group_first, uint32_t group_count,
                              uint32_t xword, uint32_t yword,
                              const uint32_t *unit_row, pim_acc_mode mode,
@@ -331,13 +287,13 @@ const char *pim_gemv_program(const pim_geometry *g, const pim_gemv_w *w,
  *     builds it once per SHAPE and lowers it once per layer's weights.
  *
  * IT NEEDS NO CONTEXT, NO ALLOCATOR AND NO BOARD.  The pointers are recorded, never
- * dereferenced or resolved.  w->w may even be a placeholder as long as the pointer
+ * dereferenced or resolved.  w->base may even be a placeholder as long as the pointer
  * that eventually gets lowered names an allocation of the right size.
  *
  * Sizing: ask pim_gemv_nisr() for the ISR count as before — logical ISRs are FEWER,
  * because a per-channel drain is one here and nch after lowering — and use
  * pim_lower_isr_count() for the lowered buffer. */
-const char *pim_gemv_logical(const pim_geometry *g, const pim_gemv_w *w,
+const char *pim_gemv_logical(const pim_geometry *g, const pim_tensor *w,
                              uint32_t group_first, uint32_t group_count,
                              const void *xgpr, size_t xbytes,
                              const void *ygpr, size_t ybytes,
@@ -345,36 +301,36 @@ const char *pim_gemv_logical(const pim_geometry *g, const pim_gemv_w *w,
 
 /* Logical ISR count — what pim_gemv_logical() will push.  Differs from
  * pim_gemv_nisr() only in that each group's drain counts once instead of nch times. */
-uint32_t pim_gemv_logical_nisr(const pim_gemv_w *w, uint32_t group_count,
+uint32_t pim_gemv_logical_nisr(const pim_tensor *w, uint32_t group_count,
                                pim_acc_mode mode);
 
 /* How many ISRs and how many vector loads a schedule costs, without building it.
  * The WRVEC count is the number the whole two-latch question is about. */
 /* What `group_count` supergroups cost in one program.  Pass w->ngroups for the
  * whole GEMV; pim_gemv_ex() passes whatever fits one doorbell. */
-uint32_t pim_gemv_nisr  (const pim_gemv_w *w, uint32_t group_count, pim_acc_mode mode);
-uint32_t pim_gemv_nwrvec(const pim_gemv_w *w, uint32_t group_count, pim_acc_mode mode);
+uint32_t pim_gemv_nisr  (const pim_tensor *w, uint32_t group_count, pim_acc_mode mode);
+uint32_t pim_gemv_nwrvec(const pim_tensor *w, uint32_t group_count, pim_acc_mode mode);
 
 /* How many supergroups fit in one program of at most `max_isrs` ISRs, and therefore
  * how many launches the whole GEMV takes.  A model-sized GEMV does not fit in one:
  * IMEM holds 16383 ISRs and a [151936 x 1024] lm_head needs 14246 of them, so the
  * next size up does not.  pim_gemv_ex() splits by supergroup automatically; this is
  * how a caller finds out that it will, and how it sizes the result buffer. */
-uint32_t pim_gemv_groups_per_launch(const pim_gemv_w *w, pim_acc_mode mode,
+uint32_t pim_gemv_groups_per_launch(const pim_tensor *w, pim_acc_mode mode,
                                     uint32_t max_isrs);
 
 /* The two GPR allocations a launch needs.  The vector is the whole padded k; the
  * result buffer only has to hold ONE launch's supergroups, because pim_gemv_ex()
  * drains it between launches.
  *
- * EXISTS SO A CALLER NEED NOT REDERIVE IT.  kpad*2 and groups*nch*32 are easy to get
+ * EXISTS SO A CALLER NEED NOT REDERIVE IT.  nredpad*2 and groups*nch*32 are easy to get
  * wrong in a way that reads back as someone else's data rather than as an error. */
-void pim_gemv_gpr_bytes(const pim_gemv_w *w, pim_acc_mode mode, uint32_t max_isrs,
+void pim_gemv_gpr_bytes(const pim_tensor *w, pim_acc_mode mode, uint32_t max_isrs,
                         size_t *xbytes, size_t *ybytes);
 
 /* One launch.
  *   x     [k] BF16 in host memory.  Tiled into xgpr here.
- *   xgpr  a PIM_MEM_GPR allocation of at least kpad*2 bytes.
+ *   xgpr  a PIM_MEM_GPR allocation of at least nredpad*2 bytes.
  *   ygpr  a PIM_MEM_GPR allocation — ask pim_gemv_gpr_bytes().  RD_MAC writes one
  *         32 B word per (supergroup, channel), and CH_MASK must be 1-hot so there is
  *         one RD_MAC per channel.  Only ONE launch's worth is needed: the buffer is
@@ -383,13 +339,13 @@ void pim_gemv_gpr_bytes(const pim_gemv_w *w, pim_acc_mode mode, uint32_t max_isr
  *
  * xgpr is rewritten every call.  A caller with a resident vector can skip that by
  * passing the same buffer and the same x; nothing here caches, so the cost is one
- * transfer of kpad*2 bytes. */
-const char *pim_gemv(pim_ctx *c, pim_exec *e, const pim_gemv_w *w,
+ * transfer of nredpad*2 bytes. */
+const char *pim_gemv(pim_ctx *c, pim_exec *e, const pim_tensor *w,
                      const uint16_t *x, void *xgpr, void *ygpr, uint16_t *y);
 
 /* The same, with the schedule chosen and the launch reported.  pim_gemv() is this
  * with PIM_ACC_SINGLE and no stat.  `st` may be NULL. */
-const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_gemv_w *w,
+const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_tensor *w,
                         const uint16_t *x, void *xgpr, void *ygpr, uint16_t *y,
                         pim_acc_mode mode, pim_gemv_stat *st);
 

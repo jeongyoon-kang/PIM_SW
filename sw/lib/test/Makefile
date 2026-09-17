@@ -46,18 +46,18 @@ pool_test: pool_test.c $(LIB)
 # pim_memcpy_ctx against its simulated card, so a host test can read back what it
 # wrote; the real one would pwrite to a closed fd.
 lower_test: lower_test.c $(LIB) ../../runtime/pim_lower.c ../../runtime/pim_gemv.c \
+            ../../runtime/pim_tensor.c \
             ../../runtime/pim_exec.c ../../runtime/pim_mac_exact.c
 	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ $(LDLIBS)
 
-eager_test: eager_test.c $(LIB) ../../runtime/pim_gemv.c \
+eager_test: eager_test.c $(LIB) ../../runtime/pim_gemv.c ../../runtime/pim_tensor.c \
             ../../runtime/pim_lower.c ../../runtime/pim_exec.c ../../runtime/pim_mac_exact.c
 	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ $(LDLIBS)
 
-# tensor_test compares pim_tensor's addressing against pim_gemv's before the two are
-# merged, so it links both.  It reads the card back through fake_drv.h rather than
+# tensor_test links pim_tensor and NOTHING ELSE from the runtime — the layer really
+# does stand alone.  It reads the card back through fake_drv.h rather than
 # recomputing addresses with the function under test.
-tensor_test: tensor_test.c $(LIB) ../../runtime/pim_tensor.c ../../runtime/pim_gemv.c \
-             ../../runtime/pim_lower.c ../../runtime/pim_exec.c ../../runtime/pim_mac_exact.c
+tensor_test: tensor_test.c $(LIB) ../../runtime/pim_tensor.c
 	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ $(LDLIBS)
 
 run: all

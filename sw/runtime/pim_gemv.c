@@ -57,46 +57,20 @@ static char gv_err[300];
 // and the unit index is (supergroup, K-chunk) flattened.  Everything about where a
 // weight goes is those two lines; the rest of this file is program building and
 // transport.
-uint64_t pim_gemv_offset(const pim_geometry *g, const pim_gemv_w *w,
-                         uint32_t j, uint32_t i)
-{
-    uint32_t bank  = j % g->nbank;
-    uint32_t ch    = (j / g->nbank) % g->nch;
-    uint32_t sg    = j / (g->nbank * g->nch);
-    uint32_t chunk = i / ELEMS_PER_ROW;
-    uint32_t in    = i % ELEMS_PER_ROW;
 
-    return (uint64_t)pim_gemv_unit(w, sg, chunk) * g->unit_bytes
-         + (uint64_t)ch   * g->nbank * g->row_bytes
-         + (uint64_t)bank * g->row_bytes
-         + (uint64_t)(in / ELEMS_PER_BEAT) * EMU_WORD_BYTES
-         + (uint64_t)(in % ELEMS_PER_BEAT) * 2u;
-}
 
-uint64_t pim_gemv_tag(const pim_geometry *g, const pim_gemv_w *w)
-{
-    uint64_t h = 0xcbf29ce484222325ull;      /* FNV-1a, 64 bit */
-#define MIX(v) do { h ^= (uint64_t)(v); h *= 0x100000001b3ull; } while (0)
-    if (!g || !w) return 0;
-    MIX(0x67656d76u);                        /* 'gemv' — which layout, not just which shape */
-    MIX(w->npad); MIX(w->kpad); MIX(w->nchunks); MIX(w->ngroups);
-    MIX(g->nch); MIX(g->nbank); MIX(g->row_bytes); MIX(g->unit_bytes);
-#undef MIX
-    return h ? h : 1;                        /* 0 is reserved for "unstamped" */
-}
-
-uint64_t pim_gemv_xtag(const pim_gemv_w *w)
+uint64_t pim_gemv_xtag(const pim_tensor *w)
 {
     uint64_t h = 0xcbf29ce484222325ull;
 #define MIX(v) do { h ^= (uint64_t)(v); h *= 0x100000001b3ull; } while (0)
     if (!w) return 0;
     MIX(0x67766563u);                        /* 'gvec' */
-    MIX(w->kpad); MIX(BEATS_PER_ROW); MIX(ELEMS_PER_BEAT);
+    MIX(w->nredpad); MIX(BEATS_PER_ROW); MIX(ELEMS_PER_BEAT);
 #undef MIX
     return h ? h : 1;
 }
 
-const char *pim_gemv_upload_x(pim_ctx *c, const pim_gemv_w *w, void *xgpr,
+const char *pim_gemv_upload_x(pim_ctx *c, const pim_tensor *w, void *xgpr,
                               const uint16_t *x)
 {
     uint16_t *buf;
@@ -104,128 +78,90 @@ const char *pim_gemv_upload_x(pim_ctx *c, const pim_gemv_w *w, void *xgpr,
 
     if (!c || !w || !xgpr || !x) return "pim_gemv_upload_x: null argument";
 
-    // calloc, NOT malloc: the tail from k to kpad must be zero and this is the
+    // calloc, NOT malloc: the tail from k to nredpad must be zero and this is the
     // only place that guarantees it.
-    buf = calloc(w->kpad, 2);
+    buf = calloc(w->nredpad, 2);
     if (!buf) return "out of host memory staging the vector";
-    memcpy(buf, x, (size_t)w->k * 2);
-    bad = pim_memcpy_ctx(c, xgpr, buf, (size_t)w->kpad * 2, PIM_TO_DEV, 0);
+    memcpy(buf, x, (size_t)w->nred * 2);
+    bad = pim_memcpy_ctx(c, xgpr, buf, (size_t)w->nredpad * 2, PIM_TO_DEV, 0);
     free(buf);
     if (bad) return bad;
     return pim_tag_set_ctx(c, xgpr, pim_gemv_xtag(w));
 }
 
-// ------------------------------------------------------------- allocation ---
-void pim_gemv_plan(const pim_geometry *g, uint32_t n, uint32_t k, pim_gemv_w *out)
+
+
+const char *pim_gemv_alloc(pim_ctx *c, uint32_t n, uint32_t k, pim_tensor *out)
 {
-    uint32_t per;
-
-    if (!g || !out) return;
-    memset(out, 0, sizeof *out);
-    if (!n || !k) return;                 /* left zeroed; pim_gemv_bytes gives 0 */
-
-    per = g->nbank * g->nch;
-    out->n = n;
-    out->k = k;
-    // PADDED TO A WHOLE SUPERGROUP.  One all-bank, all-channel MAC covers exactly
-    // `per` outputs and there is no lane mask anywhere on the MAC path — so a
-    // partial supergroup is not a thing the ISA can express.  The tail outputs get
-    // zero weights (the staging buffer is calloc'd) and are dropped on the way back.
-    out->npad    = (n + per - 1) / per * per;
-    out->ngroups = out->npad / per;
-    // Padded with ZEROS to a whole beat.  A zero weight contributes exactly 0.0f to
-    // a sum in any order, so this does not perturb the result — it is not a
-    // tolerance argument.  k is deliberately NOT padded to a whole 1024: the last
-    // chunk carries a shorter OPSIZE instead, which is real work saved.
-    out->kpad       = (k + ELEMS_PER_BEAT - 1) / ELEMS_PER_BEAT * ELEMS_PER_BEAT;
-    out->nchunks    = (out->kpad + ELEMS_PER_ROW - 1) / ELEMS_PER_ROW;
-    out->last_beats = (out->kpad - (out->nchunks - 1) * ELEMS_PER_ROW)
-                      / ELEMS_PER_BEAT;
-    out->nch        = g->nch;
-    out->nbank      = g->nbank;
-}
-
-size_t pim_gemv_bytes(const pim_geometry *g, const pim_gemv_w *w)
-{
-    if (!g || !w) return 0;
-    return (size_t)w->ngroups * w->nchunks * g->unit_bytes;
-}
-
-const char *pim_gemv_alloc(pim_ctx *c, uint32_t n, uint32_t k, pim_gemv_w *out)
-{
-    const pim_geometry *g = pim_geom_ctx(c);
+    const char *bad;
 
     if (!c || !out || !k) return "pim_gemv_alloc: null or empty argument";
     if (!n) return "pim_gemv_alloc: n is zero";
 
-    pim_gemv_plan(g, n, k, out);
-    out->w = pim_alloc_ctx(c, pim_gemv_bytes(g, out), PIM_MEM_DRAM);
-    if (!out->w) {
-        snprintf(gv_err, sizeof gv_err,
-                 "weights for [%u x %u] (padded to [%u x %u] = %u group(s) x %u "
-                 "chunk(s) of %llu KiB): %s", n, k, out->npad, out->kpad,
-                 out->ngroups, out->nchunks,
-                 (unsigned long long)(g->unit_bytes >> 10), pim_last_error_ctx(c));
-        return gv_err;
-    }
-    return NULL;
+    // NO PIM_ALLOC_F_ZERO.  A weight tensor is written once, in full, by one of the
+    // uploads below, and its padding is zeroed by the staging buffer they calloc.
+    // Clearing 500 MB of lm_head first and then overwriting all of it would be the
+    // most expensive no-op in the stack.
+    bad = pim_tensor_alloc(c, PIM_LAYOUT_OUT_MAJOR, n, k, 0, out);
+    if (bad) snprintf(gv_err, sizeof gv_err, "weights for [%u x %u]: %s", n, k, bad);
+    return bad ? gv_err : NULL;
 }
 
-void pim_gemv_free(pim_ctx *c, pim_gemv_w *w)
-{
-    if (!c || !w || !w->w) return;
-    pim_free_ctx(c, w->w);
-    w->w = NULL;
-}
 
 // Permute on the host, then ONE transfer.  See the header note on why this is not a
 // scatter any more.
-const char *pim_gemv_upload(pim_ctx *c, const pim_gemv_w *w, const uint16_t *W)
+const char *pim_gemv_upload(pim_ctx *c, const pim_tensor *w, const uint16_t *W)
 {
     const pim_geometry *g = pim_geom_ctx(c);
-    size_t nb = pim_gemv_bytes(g, w);
+    size_t nb = pim_tensor_bytes(g, w);
     uint16_t *buf;
     const char *bad;
 
-    if (!c || !w || !W || !w->w) return "pim_gemv_upload: null argument";
+    if (!c || !w || !W || !w->base) return "pim_gemv_upload: null argument";
     buf = calloc(1, nb);                  // zeroed: that IS the padding
     if (!buf) return "out of host memory staging the weights";
 
-    // j < w->n, not w->npad: the padded supergroup's rows stay as calloc left them,
+    // j < w->nout, not w->noutpad: the padded supergroup's rows stay as calloc left them,
     // which IS the zero padding.  Same for the k tail of every row.
-    for (uint32_t j = 0; j < w->n; j++)
-        for (uint32_t i = 0; i < w->k; i++)
-            buf[pim_gemv_offset(g, w, j, i) / 2] = W[(size_t)j * w->k + i];
+    for (uint32_t j = 0; j < w->nout; j++)
+        for (uint32_t i = 0; i < w->nred; i++)
+            buf[pim_tensor_offset(g, w, j, i) / 2] = W[(size_t)j * w->nred + i];
 
-    bad = pim_memcpy_ctx(c, w->w, buf, nb, PIM_TO_DEV, 0);
+    bad = pim_memcpy_ctx(c, w->base, buf, nb, PIM_TO_DEV, 0);
     free(buf);
     if (bad) return bad;
-    // STAMP WHAT WE JUST WROTE.  Until this runs the allocation holds whatever was
-    // there before, and a program built against it would be reading someone else's
-    // arrangement.  See pim_tag_set().
-    return pim_tag_set_ctx(c, w->w, pim_gemv_tag(g, w));
+    // STAMP WHAT WE JUST WROTE.  pim_tensor_alloc stamped the same value already,
+    // which makes this look redundant and it is not: the tag says "this allocation
+    // holds THIS arrangement", and between the alloc and here it held nothing.  A
+    // caller that allocates and launches without uploading should be refused, so
+    // the honest stamp is the one at the end of the fill.
+    //
+    // (It is the same value, so re-stamping cannot disagree with itself.  The day
+    // an upload writes a different arrangement than the tensor was planned for,
+    // this is the line that has to change and the alloc's does not.)
+    return pim_tag_set_ctx(c, w->base, pim_tensor_tag(g, w));
 }
 
-const char *pim_gemv_verify(pim_ctx *c, const pim_gemv_w *w, const uint16_t *W,
+const char *pim_gemv_verify(pim_ctx *c, const pim_tensor *w, const uint16_t *W,
                             uint64_t *n_bad)
 {
     const pim_geometry *g = pim_geom_ctx(c);
-    size_t nb = pim_gemv_bytes(g, w);
+    size_t nb = pim_tensor_bytes(g, w);
     uint16_t *got = malloc(nb);
     uint64_t bad_n = 0;
     const char *bad;
 
     if (!got) return "out of host memory reading the weights back";
-    if ((bad = pim_memcpy_ctx(c, got, w->w, nb, PIM_FROM_DEV, 0))) { free(got); return bad; }
+    if ((bad = pim_memcpy_ctx(c, got, w->base, nb, PIM_FROM_DEV, 0))) { free(got); return bad; }
 
-    for (uint32_t j = 0; j < w->n && bad_n == 0; j++)
-        for (uint32_t i = 0; i < w->k; i++) {
-            uint64_t off = pim_gemv_offset(g, w, j, i);
-            if (got[off / 2] != W[(size_t)j * w->k + i]) {
+    for (uint32_t j = 0; j < w->nout && bad_n == 0; j++)
+        for (uint32_t i = 0; i < w->nred; i++) {
+            uint64_t off = pim_tensor_offset(g, w, j, i);
+            if (got[off / 2] != W[(size_t)j * w->nred + i]) {
                 snprintf(gv_err, sizeof gv_err,
                          "weight [%u][%u] read back %04x, wrote %04x (allocation "
                          "offset %llu)", j, i, got[off / 2],
-                         W[(size_t)j * w->k + i], (unsigned long long)off);
+                         W[(size_t)j * w->nred + i], (unsigned long long)off);
                 bad_n++;
                 break;
             }
@@ -236,70 +172,70 @@ const char *pim_gemv_verify(pim_ctx *c, const pim_gemv_w *w, const uint16_t *W,
 }
 
 // ------------------------------------------------------- eager all-bank ---
-uint32_t pim_gemv_host_stride(const pim_gemv_w *w)
+uint32_t pim_gemv_host_stride(const pim_tensor *w)
 { (void)w; return ELEMS_PER_ROW; }
 
-bool pim_gemv_is_eager(const pim_gemv_w *w)
+bool pim_gemv_is_eager(const pim_tensor *w)
 { return w && w->nchunks == 1; }
 
-void pim_gemv_pack_eager(const pim_gemv_w *w, const uint16_t *W, uint16_t *out)
+void pim_gemv_pack_eager(const pim_tensor *w, const uint16_t *W, uint16_t *out)
 {
     if (!w || !W || !out) return;
     // calloc'd or memset by the caller?  Neither — do it here, because the ONE
     // region that must be zero (the final beat's tail) is easy to forget and a
     // stale element there does not fail, it changes the answer.
-    memset(out, 0, (size_t)w->npad * ELEMS_PER_ROW * 2);
-    for (uint32_t j = 0; j < w->n; j++)
-        memcpy(out + (size_t)j * ELEMS_PER_ROW, W + (size_t)j * w->k, (size_t)w->k * 2);
+    memset(out, 0, (size_t)w->noutpad * ELEMS_PER_ROW * 2);
+    for (uint32_t j = 0; j < w->nout; j++)
+        memcpy(out + (size_t)j * ELEMS_PER_ROW, W + (size_t)j * w->nred, (size_t)w->nred * 2);
 }
 
-const char *pim_gemv_upload_eager(pim_ctx *c, const pim_gemv_w *w, const uint16_t *W)
+const char *pim_gemv_upload_eager(pim_ctx *c, const pim_tensor *w, const uint16_t *W)
 {
     const pim_geometry *g = pim_geom_ctx(c);
     const char *bad;
 
-    if (!c || !w || !W || !w->w) return "pim_gemv_upload_eager: null argument";
+    if (!c || !w || !W || !w->base) return "pim_gemv_upload_eager: null argument";
     if (!pim_gemv_is_eager(w)) {
         snprintf(gv_err, sizeof gv_err,
                  "k = %u needs %u chunk(s), and chunks of different outputs "
                  "interleave in the allocation — the eager form is linear only "
                  "while k fits one %u-element row.  Use pim_gemv_upload().",
-                 w->k, w->nchunks, ELEMS_PER_ROW);
+                 w->nred, w->nchunks, ELEMS_PER_ROW);
         return gv_err;
     }
 
     // THE WHOLE POINT: no permutation, no staging.  The host array already IS the
     // device layout, and the two are the same number of bytes.
-    if ((bad = pim_memcpy_ctx(c, w->w, W, pim_gemv_bytes(g, w), PIM_TO_DEV, 0)))
+    if ((bad = pim_memcpy_ctx(c, w->base, W, pim_tensor_bytes(g, w), PIM_TO_DEV, 0)))
         return bad;
-    return pim_tag_set_ctx(c, w->w, pim_gemv_tag(g, w));
+    return pim_tag_set_ctx(c, w->base, pim_tensor_tag(g, w));
 }
 
-const char *pim_gemv_upload_rows(pim_ctx *c, const pim_gemv_w *w, const uint16_t *W)
+const char *pim_gemv_upload_rows(pim_ctx *c, const pim_tensor *w, const uint16_t *W)
 {
     const pim_geometry *g = pim_geom_ctx(c);
     const char *bad;
 
-    if (!c || !w || !W || !w->w) return "pim_gemv_upload_rows: null argument";
+    if (!c || !w || !W || !w->base) return "pim_gemv_upload_rows: null argument";
     if (!pim_gemv_is_eager(w)) {
         snprintf(gv_err, sizeof gv_err,
                  "k = %u needs %u chunk(s); the row form is linear only while k "
                  "fits one %u-element row.  Use pim_gemv_upload().",
-                 w->k, w->nchunks, ELEMS_PER_ROW);
+                 w->nred, w->nchunks, ELEMS_PER_ROW);
         return gv_err;
     }
 
-    // ROWS n..npad-1 ARE NOT SENT.  They back outputs nobody reads, and a bank
+    // ROWS n..noutpad-1 ARE NOT SENT.  They back outputs nobody reads, and a bank
     // computes its own row into its own accumulator, so whatever is in them stays
     // there.  Skipping them is not an optimisation of a safe thing into a risky
     // one — it is declining to write memory that is never read.
-    for (uint32_t j = 0; j < w->n; j++) {
-        uint16_t *dst = (uint16_t *)((char *)w->w + (size_t)j * g->row_bytes);
-        if ((bad = pim_memcpy_ctx(c, dst, W + (size_t)j * w->kpad,
-                                  (size_t)w->kpad * 2, PIM_TO_DEV, 0)))
+    for (uint32_t j = 0; j < w->nout; j++) {
+        uint16_t *dst = (uint16_t *)((char *)w->base + (size_t)j * g->row_bytes);
+        if ((bad = pim_memcpy_ctx(c, dst, W + (size_t)j * w->nredpad,
+                                  (size_t)w->nredpad * 2, PIM_TO_DEV, 0)))
             return bad;
     }
-    return pim_tag_set_ctx(c, w->w, pim_gemv_tag(g, w));
+    return pim_tag_set_ctx(c, w->base, pim_tensor_tag(g, w));
 }
 
 // --------------------------------------------------------- the program ---
@@ -315,16 +251,16 @@ const char *pim_gemv_upload_rows(pim_ctx *c, const pim_gemv_w *w, const uint16_t
 // once and every group takes a (MAC, RD_MAC) pair off it, because a GB-sourced MAC
 // rewinds and RD_MAC does not touch the GB.  Both schedules hoist it, both issue one
 // WRVEC, and DUAL's advantage is exactly zero.
-static bool hoist_wrvec(const pim_gemv_w *w) { return w->nchunks == 1; }
+static bool hoist_wrvec(const pim_tensor *w) { return w->nchunks == 1; }
 
-uint32_t pim_gemv_nwrvec(const pim_gemv_w *w, uint32_t count, pim_acc_mode mode)
+uint32_t pim_gemv_nwrvec(const pim_tensor *w, uint32_t count, pim_acc_mode mode)
 {
     uint32_t nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
     if (hoist_wrvec(w)) return count ? 1u : 0u;
     return ((count + nlatch - 1) / nlatch) * w->nchunks;
 }
 
-uint32_t pim_gemv_nisr(const pim_gemv_w *w, uint32_t count, pim_acc_mode mode)
+uint32_t pim_gemv_nisr(const pim_tensor *w, uint32_t count, pim_acc_mode mode)
 {
     uint32_t nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
     uint32_t n = 1 + (hoist_wrvec(w) ? 1u : 0u);        // EOS, and the hoisted WRVEC
@@ -340,7 +276,7 @@ uint32_t pim_gemv_nisr(const pim_gemv_w *w, uint32_t count, pim_acc_mode mode)
 // HOW MUCH OF A GEMV FITS BEHIND ONE DOORBELL.  Rounded down to a whole number of
 // PASSES, because a pass is the unit that shares a vector load — splitting one in
 // half would reload the vector for its second group and undo the point of DUAL.
-uint32_t pim_gemv_groups_per_launch(const pim_gemv_w *w, pim_acc_mode mode,
+uint32_t pim_gemv_groups_per_launch(const pim_tensor *w, pim_acc_mode mode,
                                     uint32_t max_isrs)
 {
     uint32_t nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
@@ -356,16 +292,16 @@ uint32_t pim_gemv_groups_per_launch(const pim_gemv_w *w, pim_acc_mode mode,
     return passes * nlatch;
 }
 
-void pim_gemv_gpr_bytes(const pim_gemv_w *w, pim_acc_mode mode, uint32_t max_isrs,
+void pim_gemv_gpr_bytes(const pim_tensor *w, pim_acc_mode mode, uint32_t max_isrs,
                         size_t *xbytes, size_t *ybytes)
 {
     uint32_t gpl = pim_gemv_groups_per_launch(w, mode, max_isrs);
 
-    if (xbytes) *xbytes = (size_t)w->kpad * 2u;
+    if (xbytes) *xbytes = (size_t)w->nredpad * 2u;
     if (ybytes) *ybytes = (size_t)(gpl ? gpl : w->ngroups) * w->nch * EMU_WORD_BYTES;
 }
 
-const char *pim_gemv_program(const pim_geometry *g, const pim_gemv_w *w,
+const char *pim_gemv_program(const pim_geometry *g, const pim_tensor *w,
                              uint32_t group_first, uint32_t group_count,
                              uint32_t xword, uint32_t yword,
                              const uint32_t *unit_row, pim_acc_mode mode,
@@ -423,7 +359,7 @@ const char *pim_gemv_program(const pim_geometry *g, const pim_gemv_w *w,
             }
 
             for (uint32_t t = 0; t < ng; t++) {
-                uint32_t row = unit_row[pim_gemv_unit(w, group_first + g0 + t, ck)];
+                uint32_t row = unit_row[pim_tensor_unit(w, group_first + g0 + t, ck)];
 
                 if (row > EMU_ISR_ROW_MAX) {
                     snprintf(gv_err, sizeof gv_err,
@@ -491,13 +427,13 @@ const char *pim_gemv_program(const pim_geometry *g, const pim_gemv_w *w,
 // ------------------------------------------------------------- the launch ---
 #define POISON_LANE 0x7FC1u     // a quiet NaN payload nothing here computes
 
-const char *pim_gemv(pim_ctx *c, pim_exec *e, const pim_gemv_w *w,
+const char *pim_gemv(pim_ctx *c, pim_exec *e, const pim_tensor *w,
                      const uint16_t *x, void *xgpr, void *ygpr, uint16_t *y)
 {
     return pim_gemv_ex(c, e, w, x, xgpr, ygpr, y, PIM_ACC_SINGLE, NULL);
 }
 
-const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_gemv_w *w,
+const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_tensor *w,
                         const uint16_t *x, void *xgpr, void *ygpr, uint16_t *y,
                         pim_acc_mode mode, pim_gemv_stat *st)
 {
@@ -524,13 +460,13 @@ const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_gemv_w *w,
         snprintf(gv_err, sizeof gv_err,
                  "not even one supergroup fits in %u ISRs at k=%u (%u chunks); the "
                  "engine's program limit is too low for this shape",
-                 pim_exec_max_isrs(e), w->k, w->nchunks);
+                 pim_exec_max_isrs(e), w->nred, w->nchunks);
         return gv_err;
     }
     ywords = gpl * w->nch;
 
     // ---- the GPR coordinates the ISA will name -------------------------
-    if ((bad = pim_addr_gpr_words_ctx(c, xgpr, (size_t)w->kpad * 2, &xword, &xn)))
+    if ((bad = pim_addr_gpr_words_ctx(c, xgpr, (size_t)w->nredpad * 2, &xword, &xn)))
         return bad;
     if ((bad = pim_addr_gpr_words_ctx(c, ygpr, (size_t)ywords * EMU_WORD_BYTES,
                                 &yword, &yn)))
@@ -546,7 +482,7 @@ const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_gemv_w *w,
     // broadcast units and the pool may have handed them out scattered.
     for (uint32_t u = 0; u < nunits; u++) {
         pim_unit un;
-        if ((bad = pim_addr_unit_ctx(c, w->w, pim_gemv_bytes(g, w), u, &un))) goto out;
+        if ((bad = pim_addr_unit_ctx(c, w->base, pim_tensor_bytes(g, w), u, &un))) goto out;
         rows[u] = (uint32_t)un.row;
     }
 
@@ -611,13 +547,13 @@ const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_gemv_w *w,
 
         // Word (sg*nch + ch), lane b  ->  output sg*16*nch + ch*16 + b.  That is
         // bank(j) = j % 16, channel(j) = (j/16) % nch, supergroup(j) = j / (16*nch)
-        // read backwards, and it is the mapping pim_gemv_offset used to place them.
-        // Outputs past w->n are the padding and are dropped here.
+        // read backwards, and it is the mapping pim_tensor_offset used to place them.
+        // Outputs past w->nout are the padding and are dropped here.
         for (uint32_t sg = 0; sg < ng; sg++)
             for (uint32_t ch = 0; ch < w->nch; ch++)
                 for (uint32_t b = 0; b < w->nbank; b++) {
                     uint32_t j = ((g0 + sg) * w->nch + ch) * w->nbank + b;
-                    if (j < w->n)
+                    if (j < w->nout)
                         y[j] = ybuf[(sg * w->nch + ch) * ELEMS_PER_BEAT + b];
                 }
     }
@@ -652,7 +588,7 @@ void pim_gemv_golden(const uint16_t *W, uint32_t n, uint32_t k,
 // gemv_test's phase 0b.  Having both lets lower_test prove they agree ISR for ISR,
 // which is a stronger statement than either alone.
 //////////////////////////////////////////////////////////////////////////////////
-uint32_t pim_gemv_logical_nisr(const pim_gemv_w *w, uint32_t count, pim_acc_mode mode)
+uint32_t pim_gemv_logical_nisr(const pim_tensor *w, uint32_t count, pim_acc_mode mode)
 {
     uint32_t nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
     uint32_t n = 1 + (hoist_wrvec(w) ? 1u : 0u);        // EOS, and the hoisted WRVEC
@@ -666,7 +602,7 @@ uint32_t pim_gemv_logical_nisr(const pim_gemv_w *w, uint32_t count, pim_acc_mode
     return n;
 }
 
-const char *pim_gemv_logical(const pim_geometry *g, const pim_gemv_w *w,
+const char *pim_gemv_logical(const pim_geometry *g, const pim_tensor *w,
                              uint32_t group_first, uint32_t group_count,
                              const void *xgpr, size_t xbytes,
                              const void *ygpr, size_t ybytes,
@@ -716,7 +652,7 @@ const char *pim_gemv_logical(const pim_geometry *g, const pim_gemv_w *w,
             }
 
             for (uint32_t t = 0; t < ng; t++) {
-                uint32_t unit = pim_gemv_unit(w, group_first + g0 + t, ck);
+                uint32_t unit = pim_tensor_unit(w, group_first + g0 + t, ck);
 
                 s = emu_isr_default_ch(ISR_OP_MAC, all_ch);
                 s.opsize     = beats;
@@ -728,8 +664,8 @@ const char *pim_gemv_logical(const pim_geometry *g, const pim_gemv_w *w,
                 if (t) emu_isr_set(&isr, ISR_F_T, 1u);
                 if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
                                                 PIM_REF_DRAM_UNIT, PIM_SPLIT_NONE,
-                                                w->w, pim_gemv_bytes(g, w), unit,
-                                                pim_gemv_tag(g, w))))
+                                                w->base, pim_tensor_bytes(g, w), unit,
+                                                pim_tensor_tag(g, w))))
                     return bad;
             }
         }

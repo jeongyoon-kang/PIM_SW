@@ -23,7 +23,6 @@
 //////////////////////////////////////////////////////////////////////////////////
 #include "fake_drv.h"
 
-#include "pimrt/pim_gemv.h"
 #include "pimrt/pim_tensor.h"
 
 #define ELEMS_PER_ROW  PIM_TENSOR_ELEMS_PER_ROW
@@ -57,42 +56,68 @@ static uint16_t mark(uint32_t out, uint32_t red)
 { uint16_t v = (uint16_t)(((out & 0xFFu) << 8) | (red & 0xFFu)); return v ? v : 0x0101u; }
 
 //////////////////////////////////////////////////////////////////////////////////
-// 1.  The generalisation did not move anything.
+// 1.  The addressing matches an independent reading of the rule.
 //
-// pim_gemv_w is about to be rewritten on top of pim_tensor, and the one thing that
-// must not change while that happens is where a byte goes — every weight already on
-// a card, every program already built, depends on it.  So this compares the two
-// formulas directly, before the port, over shapes that exercise each way the
-// arithmetic can branch.
+// Until the port, this compared pim_tensor_offset against pim_gemv_offset, which
+// was the point: the two had to agree before one could replace the other.  They do,
+// and now only one of them exists — so comparing them would be comparing a function
+// with itself, and a check that cannot fail is worse than no check because it reads
+// like one that can.
+//
+// What replaces it is a SECOND DERIVATION of the rule pim_tensor.h states, written
+// from the prose rather than from the code.  It differs in two places where the
+// implementation could be wrong and still be self-consistent:
+//
+//   ch      (out - group*per)/nbank   rather than   (out/nbank) % nch
+//   lane    red_in_row * 2            rather than   (in/16)*32 + (in%16)*2
+//
+// The second is the one worth having.  It is equal only because a beat is exactly
+// 16 lanes of two bytes with nothing between them — so it pins "beats are densely
+// packed", which the implementation's form would silently survive losing.
 //////////////////////////////////////////////////////////////////////////////////
-static void same_as_gemv(pim_ctx *c, uint32_t n, uint32_t k, const char *what)
+static uint64_t expected_offset(const pim_geometry *g, const pim_tensor *t,
+                                uint32_t out, uint32_t red)
+{
+    uint32_t per   = g->nbank * g->nch;       /* outputs one all-bank MAC covers  */
+    uint32_t group = out / per;
+    uint32_t ch    = (out - group * per) / g->nbank;
+    uint32_t bank  = out % g->nbank;
+    uint32_t chunk = red / ELEMS_PER_ROW;
+    uint32_t in    = red - chunk * ELEMS_PER_ROW;
+
+    return ((uint64_t)group * t->nchunks + chunk) * g->unit_bytes
+         + (uint64_t)ch * g->nbank * g->row_bytes
+         + (uint64_t)bank * g->row_bytes
+         + (uint64_t)in * 2u;
+}
+
+static void addressing_case(pim_ctx *c, uint32_t nout, uint32_t nred, const char *what)
 {
     const pim_geometry *g = pim_geom_ctx(c);
-    pim_gemv_w  w;
     pim_tensor  t;
-    uint32_t    bad_j = 0, bad_i = 0;
+    uint32_t    bad_o = 0, bad_r = 0;
     int         ok = 1;
 
-    pim_gemv_plan(g, n, k, &w);
-    pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, n, k, &t);
+    pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, nout, nred, &t);
 
-    CHECK(t.noutpad == w.npad && t.nredpad == w.kpad && t.nchunks == w.nchunks &&
-          t.ngroups == w.ngroups && t.last_beats == w.last_beats,
-          "%s: plan differs — tensor [%u %u %u %u %u] vs gemv [%u %u %u %u %u]", what,
-          t.noutpad, t.nredpad, t.nchunks, t.ngroups, t.last_beats,
-          w.npad, w.kpad, w.nchunks, w.ngroups, w.last_beats);
-    CHECK(pim_tensor_bytes(g, &t) == pim_gemv_bytes(g, &w), "%s: bytes differ", what);
+    // The last element of the last group's last chunk must be the last byte of the
+    // allocation — one element further and every shape here would be over-sized
+    // without any single offset being wrong.
+    CHECK(pim_tensor_offset(g, &t, t.noutpad - 1, t.nredpad - 1) + 2
+              <= pim_tensor_bytes(g, &t),
+          "%s: the last element runs past the %zu byte allocation", what,
+          pim_tensor_bytes(g, &t));
 
-    for (uint32_t j = 0; j < t.noutpad && ok; j++)
-        for (uint32_t i = 0; i < t.nredpad && ok; i++)
-            if (pim_tensor_offset(g, &t, j, i) != pim_gemv_offset(g, &w, j, i)) {
-                bad_j = j; bad_i = i; ok = 0;
+    for (uint32_t o = 0; o < t.noutpad && ok; o++)
+        for (uint32_t r = 0; r < t.nredpad && ok; r++)
+            if (pim_tensor_offset(g, &t, o, r) != expected_offset(g, &t, o, r)) {
+                bad_o = o; bad_r = r; ok = 0;
             }
-    CHECK(ok, "%s: [%u][%u] -> tensor %llu, gemv %llu", what, bad_j, bad_i,
-          (unsigned long long)pim_tensor_offset(g, &t, bad_j, bad_i),
-          (unsigned long long)pim_gemv_offset(g, &w, bad_j, bad_i));
+    CHECK(ok, "%s: [%u][%u] -> %llu, the rule says %llu", what, bad_o, bad_r,
+          (unsigned long long)pim_tensor_offset(g, &t, bad_o, bad_r),
+          (unsigned long long)expected_offset(g, &t, bad_o, bad_r));
     if (ok)
-        printf("     %-22s n=%-5u k=%-5u  %llu offsets identical\n", what, n, k,
+        printf("     %-22s nout=%-5u nred=%-5u  %llu offsets agree\n", what, nout, nred,
                (unsigned long long)t.noutpad * t.nredpad);
 }
 
@@ -248,13 +273,14 @@ int main(void)
            g->nch, g->nbank, g->row_bytes, g->row_bytes / 2,
            (unsigned long long)(g->unit_bytes >> 10));
 
-    printf("\n  1. OUT_MAJOR is bit-for-bit the layout pim_gemv already uses\n");
-    same_as_gemv(c, 2048, 1024, "a full row");
-    same_as_gemv(c, 32,   128,  "attention head");
-    same_as_gemv(c, 2048, 2048, "two chunks");
-    same_as_gemv(c, 20,   100,  "both ragged");
-    same_as_gemv(c, 1,    16,   "one output, one beat");
-    same_as_gemv(c, 3072, 8192, "3B down_proj");
+    printf("\n  1. addressing, against an independent reading of the rule\n");
+    addressing_case(c, 2048, 1024, "a full row");
+    addressing_case(c, 32,   128,  "attention head");
+    addressing_case(c, 2048, 2048, "two chunks");
+    addressing_case(c, 20,   100,  "both ragged");
+    addressing_case(c, 1,    16,   "one output, one beat");
+    addressing_case(c, 3072, 8192, "3B down_proj");
+    addressing_case(c, 1024, 8192, "3B V cache at S_max 8K");
 
     printf("\n  2. upload places the rectangle and zeroes the rest\n");
     upload_case(c, PIM_LAYOUT_OUT_MAJOR, 64, 100, "OUT_MAJOR ragged");

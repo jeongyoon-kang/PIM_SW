@@ -109,7 +109,7 @@ int main(void)
     pim_ctx    *c = NULL;
     pim_exec   *e = NULL;
     const pim_geometry *g;
-    pim_gemv_w  w;
+    pim_tensor  w;
     const char *bad;
     uint16_t   *W, x[SLICE], *got;
     void       *xg, *yg;
@@ -164,7 +164,7 @@ int main(void)
         (bad = pim_addr_gpr_words_ctx(c, yg, ybytes, &yword, &yn))) {
         printf("  words: %s\n", bad); return 1;
     }
-    if ((bad = pim_addr_unit_ctx(c, w.w, pim_gemv_bytes(g, &w), 0, &un))) {
+    if ((bad = pim_addr_unit_ctx(c, w.base, pim_tensor_bytes(g, &w), 0, &un))) {
         printf("  unit: %s\n", bad); return 1;
     }
     urow = (uint32_t)un.row;
@@ -232,7 +232,7 @@ int main(void)
                v.recovery_wr, v.sticky);
     }
 
-    pim_free_ctx(c, xg); pim_free_ctx(c, yg); pim_gemv_free(c, &w);
+    pim_free_ctx(c, xg); pim_free_ctx(c, yg); pim_tensor_free(c, &w);
     free(W); free(got);
     pim_exec_close(e); pim_close(c);
     printf("\n%s\n", fail ? "INCONCLUSIVE / FAILED" : "answered");
