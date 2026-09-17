@@ -38,6 +38,7 @@
 #include "pim/pim.h"
 #include "pimrt/pim_exec.h"
 #include "pimrt/pim_logical.h"
+#include "pimrt/pim_matvec.h"
 #include "pimrt/pim_tensor.h"
 
 #ifdef __cplusplus
@@ -259,7 +260,7 @@ void pim_gemv_pack_eager(const pim_tensor *w, const uint16_t *W, uint16_t *out);
  *                  way — pim_gemv_nwrvec() says so.
  *   ngroups == 1   there is no second group to pair with, so DUAL is SINGLE.
  */
-typedef enum { PIM_ACC_SINGLE = 0, PIM_ACC_DUAL = 1 } pim_acc_mode;
+/* pim_acc_mode moved to pimrt/pim_matvec.h, which is where the schedule lives. */
 
 typedef struct {
     uint64_t  launch_us;    /* summed over every doorbell this GEMV rang       */

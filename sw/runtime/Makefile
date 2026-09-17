@@ -29,7 +29,7 @@ override CFLAGS += -I../include -I../../hwdef
 LDFLAGS ?= -L../lib -Wl,-rpath,'$$ORIGIN/../lib'
 LDLIBS  ?= -lpim
 
-SRC := pim_exec.c pim_lower.c pim_tensor.c pim_gemv.c pim_mac_exact.c
+SRC := pim_exec.c pim_lower.c pim_tensor.c pim_matvec.c pim_gemv.c pim_mac_exact.c
 OBJ := $(SRC:.c=.o)
 HDR := ../include/pimrt/pim_tensor.h ../include/pim/pim_addr.h ../include/pimrt/pim_logical.h ../include/pimrt/pim_exec.h ../include/pimrt/pim_gemv.h \
        ../include/pim/pim.h ../include/pim/pim_geometry.h ../../hwdef/emu_regs.h

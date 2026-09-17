@@ -576,133 +576,24 @@ void pim_gemv_golden(const uint16_t *W, uint32_t n, uint32_t k,
         y[j] = pim_mac_exact(W + (size_t)j * k, x, k);
 }
 
-//////////////////////////////////////////////////////////////////////////////////
-// THE TWO-PASS FORM.  Same schedule, same order, same ISRs — but the address fields
-// are left blank and a note says what fills them.  Compare with pim_gemv_program()
-// above: the loops are identical and every emu_isr_build() call is the same.  What
-// is gone is the resolving (there is no unit_row[] to be handed) and the
-// RD_MAC-per-channel expansion, which pim_prog_lower() now does from the split hint.
-//
-// KEPT SEPARATE FROM pim_gemv_program RATHER THAN REPLACING IT.  That one is what
-// the board-verified path runs, and it is checked field-by-field on the host by
-// gemv_test's phase 0b.  Having both lets lower_test prove they agree ISR for ISR,
-// which is a stronger statement than either alone.
-//////////////////////////////////////////////////////////////////////////////////
-uint32_t pim_gemv_logical_nisr(const pim_tensor *w, uint32_t count, pim_acc_mode mode)
-{
-    uint32_t nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
-    uint32_t n = 1 + (hoist_wrvec(w) ? 1u : 0u);        // EOS, and the hoisted WRVEC
 
-    for (uint32_t g0 = 0; g0 < count; g0 += nlatch) {
-        uint32_t ng = count - g0 < nlatch ? count - g0 : nlatch;
-        n += w->nchunks * ng            // one MAC per group per chunk
-           + ng;                        // ONE logical drain per group (not nch)
-        if (!hoist_wrvec(w)) n += w->nchunks;
-    }
-    return n;
-}
-
+// A GEMV is a matvec over the whole reduction axis, and that is all it is.  Kept as
+// a name because the tests and pim_gemv_ex() speak it, and because "gemv" says
+// something "matvec with red_off 0" does not.
 const char *pim_gemv_logical(const pim_geometry *g, const pim_tensor *w,
                              uint32_t group_first, uint32_t group_count,
                              const void *xgpr, size_t xbytes,
                              const void *ygpr, size_t ybytes,
                              pim_acc_mode mode, pim_logical *out)
 {
-    uint32_t all_ch = (1u << g->nch) - 1u;
-    uint32_t nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
-    bool     hoist  = hoist_wrvec(w);
-    const char *bad;
+    if (!w) return "pim_gemv_logical: null tensor";
+    return pim_matvec_logical(g, w, group_first, group_count, 0, w->nred,
+                              xgpr, xbytes, pim_gemv_xtag(w),
+                              ygpr, ybytes, mode, out);
+}
 
-    if (!g || !w || !xgpr || !ygpr || !out)
-        return "pim_gemv_logical: null argument";
-    if (group_first + group_count > w->ngroups)
-        return "pim_gemv_logical: the group range runs past the allocation";
-
-    if (hoist) {
-        struct emu_isr_spec s = emu_isr_default_ch(ISR_OP_WRVEC, all_ch);
-        struct emu_isr      isr;
-        s.opsize = w->last_beats;
-        s.row    = 0;                    // blank; the reference below fills it
-        if ((bad = emu_isr_build(&isr, &s))) return bad;
-        if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
-                                        PIM_REF_GPR_WORD, PIM_SPLIT_NONE,
-                                        xgpr, xbytes, 0, pim_gemv_xtag(w))))
-            return bad;
-    }
-
-    for (uint32_t g0 = 0; g0 < group_count; g0 += nlatch) {
-        uint32_t ng    = group_count - g0 < nlatch ? group_count - g0 : nlatch;
-        uint32_t first = out->nisr;      // this pass owns its accumulators from here
-
-        for (uint32_t ck = 0; ck < w->nchunks; ck++) {
-            uint32_t beats = (ck == w->nchunks - 1) ? w->last_beats : BEATS_PER_ROW;
-            struct emu_isr_spec s;
-            struct emu_isr      isr;
-
-            if (!hoist) {
-                s = emu_isr_default_ch(ISR_OP_WRVEC, all_ch);
-                s.opsize = beats;
-                s.row    = 0;
-                if ((bad = emu_isr_build(&isr, &s))) return bad;
-                if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
-                                                PIM_REF_GPR_WORD, PIM_SPLIT_NONE,
-                                                xgpr, xbytes, ck * BEATS_PER_ROW,
-                                                pim_gemv_xtag(w))))
-                    return bad;
-            }
-
-            for (uint32_t t = 0; t < ng; t++) {
-                uint32_t unit = pim_tensor_unit(w, group_first + g0 + t, ck);
-
-                s = emu_isr_default_ch(ISR_OP_MAC, all_ch);
-                s.opsize     = beats;
-                s.row        = 0;
-                s.col        = 0;
-                s.pu_mask    = (1u << g->nbank) - 1u;
-                s.gb_mc_mask = s.pu_mask;
-                if ((bad = emu_isr_build(&isr, &s))) return bad;
-                if (t) emu_isr_set(&isr, ISR_F_T, 1u);
-                if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
-                                                PIM_REF_DRAM_UNIT, PIM_SPLIT_NONE,
-                                                w->base, pim_tensor_bytes(g, w), unit,
-                                                pim_tensor_tag(g, w))))
-                    return bad;
-            }
-        }
-
-        // ONE DRAIN PER GROUP, not one per (group, channel).  The word index is the
-        // FIRST of this group's nch words and PIM_SPLIT_PER_CHANNEL says the rest
-        // follow; pim_prog_lower() emits the other nch-1 and one-hots each CH_MASK.
-        //
-        // CH_MASK IS BUILT AS CHANNEL 0 RATHER THAN ALL-CHANNELS, and that is not a
-        // detail: emu_isr_build() REFUSES a multicast RD_MAC outright, so a logical
-        // program cannot hold the illegal word even briefly.  The intermediate form
-        // stays legal by construction and the split hint carries the "this stands
-        // for nch of them" meaning instead.  The lowerer overwrites CH_MASK anyway.
-        for (uint32_t t = 0; t < ng; t++) {
-            struct emu_isr_spec s = emu_isr_default_ch(ISR_OP_RD_MAC, 1u);
-            struct emu_isr      isr;
-
-            s.opsize = 0;
-            s.row    = 0;
-            if ((bad = emu_isr_build(&isr, &s))) return bad;
-            if (t) emu_isr_set(&isr, ISR_F_T, 1u);
-            if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
-                                            PIM_REF_GPR_WORD, PIM_SPLIT_PER_CHANNEL,
-                                            ygpr, ybytes, (g0 + t) * g->nch, 0)))
-                return bad;
-        }
-
-        // The pass is one accumulation region: first MAC to last RD_MAC.  Cutting
-        // inside it across a doorbell strands a running sum in a latch.
-        if ((bad = pim_logical_atom(out, first, out->nisr - 1))) return bad;
-    }
-
-    {
-        struct emu_isr_spec s = emu_isr_default_ch(ISR_OP_EOS, all_ch);
-        struct emu_isr      isr;
-        if ((bad = emu_isr_build(&isr, &s))) return bad;
-        if ((bad = pim_logical_push(out, (const pim_isr *)&isr))) return bad;
-    }
-    return NULL;
+uint32_t pim_gemv_logical_nisr(const pim_tensor *w, uint32_t count, pim_acc_mode mode)
+{
+    if (!w) return 0;
+    return pim_matvec_nisr(w, count, 0, w->nred, mode);
 }
