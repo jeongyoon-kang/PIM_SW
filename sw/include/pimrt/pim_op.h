@@ -61,8 +61,6 @@ typedef struct {
 	 * rather than producing a silently wrong number at the doorbell. */
 	bool allow_t_latch;
 
-	/* Set the DRAM timing registers at open.  See pim_exec_config. */
-	bool set_timing;
 } pim_rt_config;
 
 /* `cfg` may be NULL for defaults, which are deliberately small — a default big

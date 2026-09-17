@@ -53,6 +53,7 @@ struct pim_exec {
     uint32_t           timeout_ms;
     uint32_t           max_isrs;
     unsigned           verify_flags;
+    pim_timing         timing_at_open;
     char               err[256];
 };
 
@@ -143,35 +144,9 @@ const char *pim_exec_get_timing(pim_exec *e, pim_timing *out)
     return NULL;
 }
 
-const char *pim_exec_set_timing(pim_exec *e, const pim_timing *t, unsigned flags)
-{
-    pim_timing got;
-    const char *bad;
+const pim_timing *pim_exec_timing_at_open(const pim_exec *e)
+{ return e ? &e->timing_at_open : NULL; }
 
-    if (!e || !t) return "pim_exec_set_timing: null argument";
-
-    // The one setting that is wrong without saying so.  See the header.
-    if (t->ccd < 2 && !(flags & PIM_TIMING_ALLOW_UNSAFE))
-        return ex_err(e, "T_CCD = %u.  Below 2, two beats into one accumulator latch "
-                         "land only every OTHER beat — the answer is halved and no "
-                         "counter, status bit or error reports it.  Pass "
-                         "PIM_TIMING_ALLOW_UNSAFE if you are measuring that.",
-                      t->ccd);
-
-    for (unsigned i = 0; i < 8; i++)
-        cfr_wr(e, CFR_T_FAW + i * 4u, ((const uint8_t *)t)[i]);
-
-    // Read back rather than trust the write: these are posted MMIO stores, and a
-    // register that ignored one would otherwise be indistinguishable from one that
-    // took it.
-    if ((bad = pim_exec_get_timing(e, &got))) return bad;
-    for (unsigned i = 0; i < 8; i++)
-        if (((const uint8_t *)&got)[i] != ((const uint8_t *)t)[i])
-            return ex_err(e, "T_%s read back %u after writing %u",
-                          pim_timing_names[i], ((const uint8_t *)&got)[i],
-                          ((const uint8_t *)t)[i]);
-    return NULL;
-}
 
 // ------------------------------------------------------------------ open ----
 const char *pim_exec_open(pim_ctx *c, const pim_exec_config *cfg, pim_exec **out)
@@ -248,13 +223,28 @@ const char *pim_exec_open(pim_ctx *c, const pim_exec_config *cfg, pim_exec **out
         pim_exec_close(e); return boot_err;
     }
 
-    if (d.set_timing) {
-        pim_timing dflt = PIM_TIMING_SIM;
-        const pim_timing *pt = d.timing ? d.timing : &dflt;
-        if ((bad = pim_exec_set_timing(e, pt, 0))) {
-            snprintf(boot_err, sizeof boot_err, "%s", bad);
-            pim_exec_close(e); return boot_err;
-        }
+    // READ THE TIMING, DO NOT SET IT.  emu_timing owns these eight registers; an
+    // engine that wrote its own defaults here would revert an experiment between the
+    // moment it was set and the moment it was measured.
+    //
+    // T_CCD IS THE ONE THIS CANNOT MERELY OBSERVE.  Below 2, two beats into one
+    // accumulator latch land only every OTHER beat: the answer is halved and no
+    // counter, status bit or error reports it.  Every other register is a threshold
+    // the emulator compares against and its counters are data; this one decides what
+    // the arithmetic is.  So it is checked at open, where the run can still be
+    // stopped, rather than trusted to whoever last set it.
+    if ((bad = pim_exec_get_timing(e, &e->timing_at_open))) {
+        snprintf(boot_err, sizeof boot_err, "%s", bad);
+        pim_exec_close(e); return boot_err;
+    }
+    if (e->timing_at_open.ccd < 2) {
+        snprintf(boot_err, sizeof boot_err,
+                 "the board's T_CCD is %u.  Below 2, two beats into one accumulator "
+                 "latch land only every OTHER beat — every MAC result is halved and "
+                 "nothing reports it.  Set it with hwdef/test/emu_timing (--ccd 2, "
+                 "or --reset for the whole SIM set) before opening an engine.",
+                 e->timing_at_open.ccd);
+        pim_exec_close(e); return boot_err;
     }
 
     // IMEM becomes the one raw window libpim will carry bytes to.  Everything else

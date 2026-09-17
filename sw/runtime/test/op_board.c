@@ -81,8 +81,7 @@ int main(void)
     printf("pim_op_matvec: linear, Q.K^T and S.V through one call\n");
     if ((bad = pim_open(NULL, &c))) { printf("SKIPPED: %s\n", bad); return 0; }
     {
-        pim_rt_config cfg = { .max_red = 4096, .max_out_groups = 128,
-                              .set_timing = true };
+        pim_rt_config cfg = { .max_red = 4096, .max_out_groups = 128 };
         if ((bad = pim_rt_open(c, &cfg, &rt))) {
             printf("SKIPPED: %s\n", bad); pim_close(c); return 0;
         }
@@ -242,6 +241,16 @@ int main(void)
         printf("\n  %u ops, %u launches, %u ISRs, %u vector loads, %llu us on the "
                "doorbell\n", st.nop, st.nlaunch, st.nisr, st.nwrvec,
                (unsigned long long)st.launch_us);
+    }
+    {
+        // THE CONDITIONS THIS RUN WAS MEASURED UNDER.  Nothing here sets them —
+        // hwdef/test/emu_timing does — so a result is only comparable to another
+        // result taken at the same eight numbers, and printing them is what makes
+        // that checkable instead of remembered.
+        const pim_timing *t = pim_exec_timing_at_open(pim_rt_exec(rt));
+        printf("  timing (set by emu_timing, read here): faw %u rrd %u rcd %u "
+               "ccd %u rtp %u rp %u wr %u ras %u\n",
+               t->faw, t->rrd, t->rcd, t->ccd, t->rtp, t->rp, t->wr, t->ras);
     }
     for (unsigned ch = 0; ch < g->nch; ch++) {
         pim_viol vi;

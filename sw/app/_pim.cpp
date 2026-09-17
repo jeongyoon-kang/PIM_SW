@@ -109,13 +109,12 @@ struct Tensor {
 struct Runtime {
     pim_rt *rt = nullptr;
 
-    Runtime(uint32_t max_red, uint32_t max_out_groups, bool allow_t, bool set_timing)
+    Runtime(uint32_t max_red, uint32_t max_out_groups, bool allow_t)
     {
         pim_rt_config cfg{};
         cfg.max_red = max_red;
         cfg.max_out_groups = max_out_groups;
         cfg.allow_t_latch = allow_t;
-        cfg.set_timing = set_timing;
         ck(pim_rt_open(ctx(), &cfg, &rt));
     }
     ~Runtime() { if (rt) pim_rt_close(rt); }
@@ -210,9 +209,9 @@ PYBIND11_MODULE(_pim, m)
         });
 
     py::class_<Runtime>(m, "Runtime")
-        .def(py::init<uint32_t, uint32_t, bool, bool>(),
+        .def(py::init<uint32_t, uint32_t, bool>(),
              py::arg("max_red"), py::arg("max_out_groups"),
-             py::arg("allow_t_latch") = false, py::arg("set_timing") = true)
+             py::arg("allow_t_latch") = false)
         .def("matvec", &Runtime::matvec,
              py::arg("m"), py::arg("out_first"), py::arg("out_count"),
              py::arg("red_off"), py::arg("red_len"),

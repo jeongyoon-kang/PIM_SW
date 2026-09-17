@@ -384,7 +384,8 @@ const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_tensor *w,
  * comparison:
  *   1. both operand buffers zero in the padding lanes  (pim_gemv calloc's both)
  *   2. the accumulator empty on entry                  (pim_prog_verify enforces)
- *   3. T_CCD >= 2                                      (pim_exec_open set_timing)
+ *   3. T_CCD >= 2                             (checked by pim_exec_open; set it
+ *                                              with hwdef/test/emu_timing)
  *   4. the RNE acc->BF16 converter, not the truncating one  (this bitstream) */
 void pim_gemv_golden(const uint16_t *W, uint32_t n, uint32_t k,
                      const uint16_t *x, uint16_t *y);

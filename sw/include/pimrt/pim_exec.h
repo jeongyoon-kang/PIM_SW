@@ -62,7 +62,20 @@ typedef struct { uint64_t w[4]; } pim_isr;
 
 typedef struct pim_exec pim_exec;
 
-/* The DRAM timing model's registers, written once at open when set_timing is set.
+/* The DRAM timing model's registers.
+ *
+ * THIS LAYER DOES NOT WRITE THEM.  hwdef/test/emu_timing owns them, and one owner is
+ * the whole point: that tool exists to set a value and ask what it does, and an
+ * engine that wrote its own defaults at every open would silently revert the
+ * experiment between setting it and measuring it.  `emu_timing --scale 6 --keep`
+ * followed by any program that opened an engine used to end up back at the SIM set
+ * without saying so.
+ *
+ * SO THERE IS NO SETTER HERE.  pim_exec_open READS them, refuses on the one value
+ * that is wrong without saying so (T_CCD < 2), and hands them back through
+ * pim_exec_timing_at_open() so a run can report the conditions it ran under.  When
+ * something eventually owns the control plane the write goes there, with the
+ * doorbell — not back into a compute library.
  *
  * T_CCD MUST NOT DROP BELOW 2.  acc_top is a two-stage feedback pipe with no
  * forwarding, so back-to-back beats into one latch accumulate every OTHER beat —
@@ -92,21 +105,10 @@ typedef struct { uint8_t faw, rrd, rcd, ccd, rtp, rp, wr, ras; } pim_timing;
  * what anyone last asked for. */
 const char *pim_exec_get_timing(pim_exec *e, pim_timing *out);
 
-/* Write them, then read back and refuse if the device disagrees.
- *
- * T_CCD < 2 IS REFUSED unless PIM_TIMING_ALLOW_UNSAFE.  acc_top is a two-stage
- * feedback pipe with no forwarding, so back-to-back beats into one latch land only
- * every OTHER beat — the answer is simply halved and NOTHING reports it: no
- * violation counter, no status bit, no error.  A caller that sets the flag is
- * saying it will check its own results, which is what a probe measuring the
- * boundary does.  (Two accumulator latches do not lift this — measured 2026-08-21,
- * both schedules break identically at T_CCD=1.  The rule is about beats within one
- * MAC and T is per-ISR.)
- *
- * CHANGING TIMING DOES NOT MOVE DATA.  It changes how the emulated memory is
- * scheduled, so resident weights stay valid across a change. */
-#define PIM_TIMING_ALLOW_UNSAFE  0x1u
-const char *pim_exec_set_timing(pim_exec *e, const pim_timing *t, unsigned flags);
+/* What the registers held when this engine opened.  Cheaper than re-reading and it
+ * is what the run actually used, so a report can name its own conditions. */
+const pim_timing *pim_exec_timing_at_open(const pim_exec *e);
+
 
 /* The register offsets in the order the struct lists them, for a tool that wants to
  * name them.  CFR_T_FAW .. CFR_T_RAS are contiguous 4-byte registers. */
@@ -120,8 +122,8 @@ typedef struct {
      * to split across launches on a shape that would otherwise fit — which is the
      * only way to test that path without a model-sized GEMV. */
     uint32_t    max_isrs;
-    bool        set_timing;  /* write the DRAM timing registers at open */
-    const pim_timing *timing;/* NULL -> PIM_TIMING_SIM.  Only read if set_timing. */
+    /* THE TIMING REGISTERS ARE NOT HERE, on purpose — see the pim_timing block
+     * above.  emu_timing sets them; this reads them. */
 
     /* ISR[35] SELECTS ONE OF TWO PER-BANK ACCUMULATOR LATCHES, and on this image
      * it may not be wired.  the platform conf says:

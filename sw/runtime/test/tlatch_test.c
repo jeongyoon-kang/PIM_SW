@@ -84,7 +84,7 @@ int main(int argc, char **argv)
 
     // allow_t_latch: this program is the evidence, so it is the one caller entitled
     // to set it.  Everything else gets pim_prog_verify's refusal.
-    pim_exec_config ec = { .bdf = bdf, .set_timing = true, .allow_t_latch = true };
+    pim_exec_config ec = { .bdf = bdf, .allow_t_latch = true };
     if ((bad = pim_exec_open(c, &ec, &e))) { printf("SKIPPED: %s\n", bad); pim_close(c); return 0; }
 
     const pim_geometry *g = pim_geom_ctx(c);

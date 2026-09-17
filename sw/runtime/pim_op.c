@@ -109,7 +109,7 @@ const char *pim_rt_open(pim_ctx *c, const pim_rt_config *cfg, pim_rt **out)
     r->cfg = *cfg;
 
     {
-        pim_exec_config ec = { .set_timing = cfg->set_timing };
+        pim_exec_config ec = { 0 };
         const char *bad = pim_exec_open(c, &ec, &r->exec);
         if (bad) { free(r); snprintf(open_err, sizeof open_err, "%s", bad); return open_err; }
     }

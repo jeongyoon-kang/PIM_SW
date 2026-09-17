@@ -73,7 +73,7 @@ int main(int argc, char **argv)
     printf("eager all-bank upload, on the board\n");
     if ((bad = pim_open(NULL, &c))) { printf("SKIPPED: %s\n", bad); return 0; }
     {
-        pim_exec_config ec = { .set_timing = true };
+        pim_exec_config ec = { 0 };
         if ((bad = pim_exec_open(c, &ec, &e))) {
             printf("SKIPPED: %s\n", bad); pim_close(c); return 0;
         }

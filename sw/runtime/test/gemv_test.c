@@ -422,8 +422,7 @@ int main(int argc, char **argv)
         return 0;
     }
     {
-        pim_exec_config ec = { .bdf = bdf, .set_timing = true,
-                               .max_isrs = max_isrs,
+        pim_exec_config ec = { .bdf = bdf, .max_isrs = max_isrs,
                                .allow_t_latch = (mode == PIM_ACC_DUAL) };
         if ((bad = pim_exec_open(c, &ec, &e))) {
             printf("  SKIPPED: %s\n", bad);

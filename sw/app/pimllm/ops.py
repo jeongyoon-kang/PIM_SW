@@ -124,8 +124,10 @@ class Runtime:
     threads, the same way pim_ctx is not shared."""
 
     def __init__(self, max_red: int, max_out_groups: int,
-                 allow_t_latch: bool = False, set_timing: bool = True):
-        self._r = _pim.Runtime(max_red, max_out_groups, allow_t_latch, set_timing)
+                 allow_t_latch: bool = False):
+        # The DRAM timing registers are NOT set here.  hwdef/test/emu_timing owns
+        # them; opening an engine reads them and refuses on T_CCD < 2.
+        self._r = _pim.Runtime(max_red, max_out_groups, allow_t_latch)
         g = _pim.geometry()
         self.nch, self.nbank = g["nch"], g["nbank"]
         self.per_group = self.nch * self.nbank
