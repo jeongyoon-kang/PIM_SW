@@ -1,0 +1,65 @@
+platform ch2 (compiled in)  —  2 ch x 16 bank, window 256 MiB, stride 1024 MiB
+         chanmap=RoChBaCo (interleave, channel every 32 KiB)
+
+MC is the READ side
+  range   MC +0x000000000 .. +0x0003fffff   4 MiB
+  MC      one address 0x20400000000, blocked
+  direct  32 of 32 (channel, bank) shares, 128 KiB each at most
+  blocks  256 MiB per MC transfer
+
+  step           via       transfers        MB/s
+  -------------- --------- --------- -----------
+  poison         direct           32        5128
+  write payload  direct           32        5638
+  read back      MC                1          98   <-- MC READ
+
+PASS  4 MiB, every byte where the host put it
+      32 (channel, bank) shares, all poisoned and all transferred
+      before any read-back — a permuted address could not have passed
+
+  violation CSR ch0 ANY: 0x0000   (no violations — every row below should read 0)
+    timing : faw=80 rrd=20 rcd=75 ccd=10 rtp=20 rp=85 wr=140 ras=170
+    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |
+         | cnt    max  | cnt    max  | cnt    max  | cnt    max  |
+    -----+-------------+-------------+-------------+-------------+
+       0 |   0      0  |   0      0  |   0      0  |   0      0  |
+       1 |   0      0  |   0      0  |   0      0  |   0      0  |
+       2 |   0      0  |   0      0  |   0      0  |   0      0  |
+       3 |   0      0  |   0      0  |   0      0  |   0      0  |
+       4 |   0      0  |   0      0  |   0      0  |   0      0  |
+       5 |   0      0  |   0      0  |   0      0  |   0      0  |
+       6 |   0      0  |   0      0  |   0      0  |   0      0  |
+       7 |   0      0  |   0      0  |   0      0  |   0      0  |
+       8 |   0      0  |   0      0  |   0      0  |   0      0  |
+       9 |   0      0  |   0      0  |   0      0  |   0      0  |
+      10 |   0      0  |   0      0  |   0      0  |   0      0  |
+      11 |   0      0  |   0      0  |   0      0  |   0      0  |
+      12 |   0      0  |   0      0  |   0      0  |   0      0  |
+      13 |   0      0  |   0      0  |   0      0  |   0      0  |
+      14 |   0      0  |   0      0  |   0      0  |   0      0  |
+      15 |   0      0  |   0      0  |   0      0  |   0      0  |
+
+  violation CSR ch1 ANY: 0x0000   (no violations — every row below should read 0)
+    timing : faw=80 rrd=20 rcd=75 ccd=10 rtp=20 rp=85 wr=140 ras=170
+    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |
+         | cnt    max  | cnt    max  | cnt    max  | cnt    max  |
+    -----+-------------+-------------+-------------+-------------+
+       0 |   0      0  |   0      0  |   0      0  |   0      0  |
+       1 |   0      0  |   0      0  |   0      0  |   0      0  |
+       2 |   0      0  |   0      0  |   0      0  |   0      0  |
+       3 |   0      0  |   0      0  |   0      0  |   0      0  |
+       4 |   0      0  |   0      0  |   0      0  |   0      0  |
+       5 |   0      0  |   0      0  |   0      0  |   0      0  |
+       6 |   0      0  |   0      0  |   0      0  |   0      0  |
+       7 |   0      0  |   0      0  |   0      0  |   0      0  |
+       8 |   0      0  |   0      0  |   0      0  |   0      0  |
+       9 |   0      0  |   0      0  |   0      0  |   0      0  |
+      10 |   0      0  |   0      0  |   0      0  |   0      0  |
+      11 |   0      0  |   0      0  |   0      0  |   0      0  |
+      12 |   0      0  |   0      0  |   0      0  |   0      0  |
+      13 |   0      0  |   0      0  |   0      0  |   0      0  |
+      14 |   0      0  |   0      0  |   0      0  |   0      0  |
+      15 |   0      0  |   0      0  |   0      0  |   0      0  |
+PASS
+
+--- 실행: /home/kjy/pim/emulator_top/hwdef/test/emu_mc --read --mib 4

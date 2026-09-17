@@ -1,0 +1,75 @@
+platform ch2 (compiled in)  —  2 ch x 16 bank, window 256 MiB, stride 1024 MiB
+         chanmap=RoChBaCo (interleave, channel every 32 KiB)
+GEMV tile — vector reaches the PUs through the GLOBAL BUFFER
+  fill    copy (bank DRAM -> GB)
+  pu_mask = gb_mc_mask  0xFFFF   (16 banks participate)
+  L = 32 beats,  K = 512,  weights at DRAM row 100,  A_c,b[k] = 1 + 16c + b,  v[k] = 1
+  copy    vector at bank 0 DRAM row 200, route[0]=16 (GB)
+  result  GPR word 1041
+
+  programs — one per fill path.  TWO SEPARATE DOORBELLS, not one
+  program: a GEMV needs exactly one GB fill and these are two ways
+  of doing it.  Everything after word 0 is identical, which is what
+  makes the lane comparison a test of the fill path alone.
+
+    [COPY]  vector from bank DRAM — ONE COPY PER CHANNEL, see step 3b
+      0  COPY        00000000000000000000fffffffffffffffffff0000000007040000008003200
+      1  MAC         0000000000000000ffffffffffffffffffffffff3fffc0006040000008001900
+      2  RD_MAC ch0  00000000000000000000ffffffffffffffffffff000000008000000008010440
+      3  EOS         00000000000000000000ffffffffffffffffffff000000008800000008000000
+
+  0. dispatcher idle (STATUS 0x80000003)
+  1. timing (set with ./emu_timing --scale N --keep, this kernel does not write it)
+    timing : faw=80 rrd=20 rcd=75 ccd=10 rtp=20 rp=85 wr=140 ras=170
+  2. operands written: 1 channel(s) x 16 banks x 1024 B at row 100 (bank offset 0x32000)
+  3b. vector -> ch0 bank 0 DRAM row 200 (AXI 0x04000064000)  (for COPY)
+
+  === fill = COPY ===
+  ran: STATUS 0x80000003 -> 0x80000003 (done=1 state=3), 24 us, 17 STATUS polls, 1 GPR reads
+
+   ch | bank | part | expected        | got             |
+  ----+------+------+-----------------+-----------------+------
+    0 |   0  |  y  |      512 0x4400 |      512 0x4400 | ok
+    0 |   1  |  y  |     1024 0x4480 |     1024 0x4480 | ok
+    0 |   2  |  y  |     1536 0x44c0 |     1536 0x44c0 | ok
+    0 |   3  |  y  |     2048 0x4500 |     2048 0x4500 | ok
+    0 |   4  |  y  |     2560 0x4520 |     2560 0x4520 | ok
+    0 |   5  |  y  |     3072 0x4540 |     3072 0x4540 | ok
+    0 |   6  |  y  |     3584 0x4560 |     3584 0x4560 | ok
+    0 |   7  |  y  |     4096 0x4580 |     4096 0x4580 | ok
+    0 |   8  |  y  |     4608 0x4590 |     4608 0x4590 | ok
+    0 |   9  |  y  |     5120 0x45a0 |     5120 0x45a0 | ok
+    0 |  10  |  y  |     5632 0x45b0 |     5632 0x45b0 | ok
+    0 |  11  |  y  |     6144 0x45c0 |     6144 0x45c0 | ok
+    0 |  12  |  y  |     6656 0x45d0 |     6656 0x45d0 | ok
+    0 |  13  |  y  |     7168 0x45e0 |     7168 0x45e0 | ok
+    0 |  14  |  y  |     7680 0x45f0 |     7680 0x45f0 | ok
+    0 |  15  |  y  |     8192 0x4600 |     8192 0x4600 | ok
+
+  violation counters were CLEARED before this run (stale ANY from earlier runs was 0x0000)
+
+  violation CSR ch0 ANY: 0x0000   (no violations — every row below should read 0)
+    timing : faw=80 rrd=20 rcd=75 ccd=10 rtp=20 rp=85 wr=140 ras=170
+    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |
+         | cnt    max  | cnt    max  | cnt    max  | cnt    max  |
+    -----+-------------+-------------+-------------+-------------+
+       0 |   0      0  |   0      0  |   0      0  |   0      0  |
+       1 |   0      0  |   0      0  |   0      0  |   0      0  |
+       2 |   0      0  |   0      0  |   0      0  |   0      0  |
+       3 |   0      0  |   0      0  |   0      0  |   0      0  |
+       4 |   0      0  |   0      0  |   0      0  |   0      0  |
+       5 |   0      0  |   0      0  |   0      0  |   0      0  |
+       6 |   0      0  |   0      0  |   0      0  |   0      0  |
+       7 |   0      0  |   0      0  |   0      0  |   0      0  |
+       8 |   0      0  |   0      0  |   0      0  |   0      0  |
+       9 |   0      0  |   0      0  |   0      0  |   0      0  |
+      10 |   0      0  |   0      0  |   0      0  |   0      0  |
+      11 |   0      0  |   0      0  |   0      0  |   0      0  |
+      12 |   0      0  |   0      0  |   0      0  |   0      0  |
+      13 |   0      0  |   0      0  |   0      0  |   0      0  |
+      14 |   0      0  |   0      0  |   0      0  |   0      0  |
+      15 |   0      0  |   0      0  |   0      0  |   0      0  |
+
+PASS
+
+--- 실행: /home/kjy/pim/emulator_top/hwdef/test/emu_gemv --ch 0 --fill copy --l 32

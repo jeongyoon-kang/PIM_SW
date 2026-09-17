@@ -1,0 +1,118 @@
+platform ch2 (compiled in)  —  2 ch x 16 bank, window 256 MiB, stride 1024 MiB
+         chanmap=RoChBaCo (interleave, channel every 32 KiB)
+GEMV tile — vector reaches the PUs through the GLOBAL BUFFER
+  fill    copy (bank DRAM -> GB)
+  pu_mask = gb_mc_mask  0xFFFF   (16 banks participate)
+  L = 32 beats,  K = 512,  weights at DRAM row 100,  A_c,b[k] = 1 + 16c + b,  v[k] = 1
+  copy    vector at bank 0 DRAM row 200, route[0]=16 (GB)
+          NOTE: 2 channels, so the vector is written to bank 0 row 200 of EACH of them.
+          A multicast COPY makes every channel read its OWN bank, so a shared vector
+          must be replicated first.  WRVEC needs one GPR write and no replication.
+  result  GPR word 1041
+
+  programs — one per fill path.  TWO SEPARATE DOORBELLS, not one
+  program: a GEMV needs exactly one GB fill and these are two ways
+  of doing it.  Everything after word 0 is identical, which is what
+  makes the lane comparison a test of the fill path alone.
+
+    [COPY]  vector from bank DRAM — ONE COPY PER CHANNEL, see step 3b
+      0  COPY        00000000000000000000fffffffffffffffffff0000000007040000018003200
+      1  MAC         0000000000000000ffffffffffffffffffffffff3fffc0006040000018001900
+      2  RD_MAC ch0  00000000000000000000ffffffffffffffffffff000000008000000008010440
+      3  RD_MAC ch1  00000000000000000000ffffffffffffffffffff000000008000000010010480
+      4  EOS         00000000000000000000ffffffffffffffffffff000000008800000018000000
+
+  0. dispatcher idle (STATUS 0x80000003)
+  1. timing (set with ./emu_timing --scale N --keep, this kernel does not write it)
+    timing : faw=16 rrd=4 rcd=15 ccd=2 rtp=4 rp=17 wr=28 ras=34
+  2. operands written: 2 channel(s) x 16 banks x 1024 B at row 100 (bank offset 0x32000)
+  3b. vector -> ch0 bank 0 DRAM row 200 (AXI 0x04000064000)  (for COPY)
+  3b. vector -> ch1 bank 0 DRAM row 200 (AXI 0x04400064000)  (for COPY)
+
+  === fill = COPY ===
+  ran: STATUS 0x80000003 -> 0x80000003 (done=1 state=3), 17 us, 5 STATUS polls, 1 GPR reads
+
+   ch | bank | part | expected        | got             |
+  ----+------+------+-----------------+-----------------+------
+    0 |   0  |  y  |      512 0x4400 |      512 0x4400 | ok
+    0 |   1  |  y  |     1024 0x4480 |     1024 0x4480 | ok
+    0 |   2  |  y  |     1536 0x44c0 |     1536 0x44c0 | ok
+    0 |   3  |  y  |     2048 0x4500 |     2048 0x4500 | ok
+    0 |   4  |  y  |     2560 0x4520 |     2560 0x4520 | ok
+    0 |   5  |  y  |     3072 0x4540 |     3072 0x4540 | ok
+    0 |   6  |  y  |     3584 0x4560 |     3584 0x4560 | ok
+    0 |   7  |  y  |     4096 0x4580 |     4096 0x4580 | ok
+    0 |   8  |  y  |     4608 0x4590 |     4608 0x4590 | ok
+    0 |   9  |  y  |     5120 0x45a0 |     5120 0x45a0 | ok
+    0 |  10  |  y  |     5632 0x45b0 |     5632 0x45b0 | ok
+    0 |  11  |  y  |     6144 0x45c0 |     6144 0x45c0 | ok
+    0 |  12  |  y  |     6656 0x45d0 |     6656 0x45d0 | ok
+    0 |  13  |  y  |     7168 0x45e0 |     7168 0x45e0 | ok
+    0 |  14  |  y  |     7680 0x45f0 |     7680 0x45f0 | ok
+    0 |  15  |  y  |     8192 0x4600 |     8192 0x4600 | ok
+    1 |   0  |  y  |     8704 0x4608 |     8704 0x4608 | ok
+    1 |   1  |  y  |     9216 0x4610 |     9216 0x4610 | ok
+    1 |   2  |  y  |     9728 0x4618 |     9728 0x4618 | ok
+    1 |   3  |  y  |    10240 0x4620 |    10240 0x4620 | ok
+    1 |   4  |  y  |    10752 0x4628 |    10752 0x4628 | ok
+    1 |   5  |  y  |    11264 0x4630 |    11264 0x4630 | ok
+    1 |   6  |  y  |    11776 0x4638 |    11776 0x4638 | ok
+    1 |   7  |  y  |    12288 0x4640 |    12288 0x4640 | ok
+    1 |   8  |  y  |    12800 0x4648 |    12800 0x4648 | ok
+    1 |   9  |  y  |    13312 0x4650 |    13312 0x4650 | ok
+    1 |  10  |  y  |    13824 0x4658 |    13824 0x4658 | ok
+    1 |  11  |  y  |    14336 0x4660 |    14336 0x4660 | ok
+    1 |  12  |  y  |    14848 0x4668 |    14848 0x4668 | ok
+    1 |  13  |  y  |    15360 0x4670 |    15360 0x4670 | ok
+    1 |  14  |  y  |    15872 0x4678 |    15872 0x4678 | ok
+    1 |  15  |  y  |    16384 0x4680 |    16384 0x4680 | ok
+
+  violation counters were CLEARED before this run (stale ANY from earlier runs was 0x0cc0)
+
+  violation CSR ch0 ANY: 0x0001
+    timing : faw=16 rrd=4 rcd=15 ccd=2 rtp=4 rp=17 wr=28 ras=34
+    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |
+         | cnt    max  | cnt    max  | cnt    max  | cnt    max  |
+    -----+-------------+-------------+-------------+-------------+
+       0 |   1     14  |   0      0  |   0      0  |   0      0  |  <-- ANY
+       1 |   0      0  |   0      0  |   0      0  |   0      0  |
+       2 |   0      0  |   0      0  |   0      0  |   0      0  |
+       3 |   0      0  |   0      0  |   0      0  |   0      0  |
+       4 |   0      0  |   0      0  |   0      0  |   0      0  |
+       5 |   0      0  |   0      0  |   0      0  |   0      0  |
+       6 |   0      0  |   0      0  |   0      0  |   0      0  |
+       7 |   0      0  |   0      0  |   0      0  |   0      0  |
+       8 |   0      0  |   0      0  |   0      0  |   0      0  |
+       9 |   0      0  |   0      0  |   0      0  |   0      0  |
+      10 |   0      0  |   0      0  |   0      0  |   0      0  |
+      11 |   0      0  |   0      0  |   0      0  |   0      0  |
+      12 |   0      0  |   0      0  |   0      0  |   0      0  |
+      13 |   0      0  |   0      0  |   0      0  |   0      0  |
+      14 |   0      0  |   0      0  |   0      0  |   0      0  |
+      15 |   0      0  |   0      0  |   0      0  |   0      0  |
+
+  violation CSR ch1 ANY: 0x3000
+    timing : faw=16 rrd=4 rcd=15 ccd=2 rtp=4 rp=17 wr=28 ras=34
+    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |
+         | cnt    max  | cnt    max  | cnt    max  | cnt    max  |
+    -----+-------------+-------------+-------------+-------------+
+       0 |   0      0  |   0      0  |   0      0  |   0      0  |
+       1 |   0      0  |   0      0  |   0      0  |   0      0  |
+       2 |   0      0  |   0      0  |   0      0  |   0      0  |
+       3 |   0      0  |   0      0  |   0      0  |   0      0  |
+       4 |   0      0  |   0      0  |   0      0  |   0      0  |
+       5 |   0      0  |   0      0  |   0      0  |   0      0  |
+       6 |   0      0  |   0      0  |   0      0  |   0      0  |
+       7 |   0      0  |   0      0  |   0      0  |   0      0  |
+       8 |   0      0  |   0      0  |   0      0  |   0      0  |
+       9 |   0      0  |   0      0  |   0      0  |   0      0  |
+      10 |   0      0  |   0      0  |   0      0  |   0      0  |
+      11 |   0      0  |   0      0  |   0      0  |   0      0  |
+      12 |   1     39  |   0      0  |   0      0  |   0      0  |  <-- ANY
+      13 |   1     39  |   0      0  |   0      0  |   0      0  |  <-- ANY
+      14 |   0      0  |   0      0  |   0      0  |   0      0  |
+      15 |   0      0  |   0      0  |   0      0  |   0      0  |
+
+PASS
+
+--- 실행: /home/kjy/pim/emulator_top/hwdef/test/emu_gemv --chs 0,1 --fill copy --l 32

@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 390" width="940" height="390"
+     role="img" aria-label="같은 버스트에서 AR 은 256 바이트를 선언하고 R 은 512 바이트를 실어온다. 주소축 위에 두 막대를 겹쳐 비교했고, 요청하지 않은 뒤쪽 256 바이트를 붉게 표시했다.">
+  <defs>
+    <marker id="ax" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/>
+    </marker>
+  </defs>
+  <rect width="940" height="390" fill="#fbfbf9"/>
+
+  <text x="40" y="34" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="18" font-weight="700" fill="#17170f">한 버스트 안에서 AR 과 R 이 어긋난다</text>
+  <text x="40" y="55" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="12" fill="#6b6b62">SLOT 7 · emulator_controller_0/s_axi · AR 219개 전부 동일 · 검사한 8개 버스트 전부 배수 ×2.0</text>
+  <line x1="40" y1="70" x2="900" y2="70" stroke="#dcdcd4"/>
+
+  <!-- 주소 눈금 -->
+  <g font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#6b6b62" text-anchor="middle">
+    <text x="100" y="98">0x000</text>
+    <text x="300" y="98">0x080</text>
+    <text x="500" y="98">0x100</text>
+    <text x="700" y="98">0x180</text>
+    <text x="900" y="98">0x200</text>
+  </g>
+  <g stroke="#c9c9c0" stroke-width="1">
+    <line x1="100" y1="104" x2="100" y2="112"/><line x1="300" y1="104" x2="300" y2="112"/>
+    <line x1="500" y1="104" x2="500" y2="112"/><line x1="700" y1="104" x2="700" y2="112"/>
+    <line x1="900" y1="104" x2="900" y2="112"/>
+    <line x1="100" y1="112" x2="900" y2="112"/>
+  </g>
+  <text x="40" y="98" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="10" fill="#6b6b62">슬롯 오프셋</text>
+
+  <!-- AR 막대 -->
+  <text x="100" y="138" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="12" font-weight="700" fill="#17170f">AR 이 선언한 범위 — <tspan font-family="ui-monospace,Menlo,monospace" font-size="11">arlen=15</tspan> (16 beat) × <tspan font-family="ui-monospace,Menlo,monospace" font-size="11">arsize=16 B</tspan> = <tspan fill="#3d5a80">256 B</tspan></text>
+  <rect x="100" y="146" width="400" height="40" fill="#eceff4" stroke="#5a6b80" stroke-width="1.4"/>
+  <g stroke="#a9b4c4" stroke-width="0.8">
+    <line x1="125" y1="146" x2="125" y2="186"/><line x1="150" y1="146" x2="150" y2="186"/>
+    <line x1="175" y1="146" x2="175" y2="186"/><line x1="200" y1="146" x2="200" y2="186"/>
+    <line x1="225" y1="146" x2="225" y2="186"/><line x1="250" y1="146" x2="250" y2="186"/>
+    <line x1="275" y1="146" x2="275" y2="186"/><line x1="300" y1="146" x2="300" y2="186"/>
+    <line x1="325" y1="146" x2="325" y2="186"/><line x1="350" y1="146" x2="350" y2="186"/>
+    <line x1="375" y1="146" x2="375" y2="186"/><line x1="400" y1="146" x2="400" y2="186"/>
+    <line x1="425" y1="146" x2="425" y2="186"/><line x1="450" y1="146" x2="450" y2="186"/>
+    <line x1="475" y1="146" x2="475" y2="186"/>
+  </g>
+  <text x="300" y="171" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11" font-weight="700" fill="#3d5a80">16 beat × 16 B</text>
+  <text x="512" y="171" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11" fill="#6b6b62">← 호스트는 여기까지만 요청했다</text>
+
+  <!-- R 막대 -->
+  <text x="100" y="228" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="12" font-weight="700" fill="#17170f">R 이 실제로 실어온 데이터 — 16 beat 이 각각 <tspan font-weight="700">32 B</tspan> 통째 = <tspan fill="#b3261e">512 B</tspan></text>
+  <rect x="100" y="236" width="400" height="40" fill="#eeeeea" stroke="#c9c9c0" stroke-width="1.4"/>
+  <rect x="500" y="236" width="400" height="40" fill="#fce9e7" stroke="#b3261e" stroke-width="1.4"/>
+  <g stroke="#c9c9c0" stroke-width="0.8">
+    <line x1="150" y1="236" x2="150" y2="276"/><line x1="200" y1="236" x2="200" y2="276"/>
+    <line x1="250" y1="236" x2="250" y2="276"/><line x1="300" y1="236" x2="300" y2="276"/>
+    <line x1="350" y1="236" x2="350" y2="276"/><line x1="400" y1="236" x2="400" y2="276"/>
+    <line x1="450" y1="236" x2="450" y2="276"/>
+  </g>
+  <g stroke="#e0a9a3" stroke-width="0.8">
+    <line x1="550" y1="236" x2="550" y2="276"/><line x1="600" y1="236" x2="600" y2="276"/>
+    <line x1="650" y1="236" x2="650" y2="276"/><line x1="700" y1="236" x2="700" y2="276"/>
+    <line x1="750" y1="236" x2="750" y2="276"/><line x1="800" y1="236" x2="800" y2="276"/>
+    <line x1="850" y1="236" x2="850" y2="276"/>
+  </g>
+  <text x="700" y="261" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11.5" font-weight="700" fill="#8c1d18">요청하지 않은 256 B</text>
+
+  <!-- beat 번호 -->
+  <g font-family="ui-monospace,Menlo,monospace" font-size="8.5" fill="#6b6b62" text-anchor="middle">
+    <text x="125" y="290">0</text><text x="175" y="290">1</text><text x="225" y="290">2</text><text x="275" y="290">3</text>
+    <text x="325" y="290">4</text><text x="375" y="290">5</text><text x="425" y="290">6</text><text x="475" y="290">7</text>
+    <text x="525" y="290">8</text><text x="575" y="290">9</text><text x="625" y="290">10</text><text x="675" y="290">11</text>
+    <text x="725" y="290">12</text><text x="775" y="290">13</text><text x="825" y="290">14</text><text x="875" y="290">15</text>
+  </g>
+  <text x="40" y="290" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="9.5" fill="#6b6b62">R beat</text>
+
+  <!-- AR 끝 경계선 -->
+  <line x1="500" y1="112" x2="500" y2="296" stroke="#b3261e" stroke-width="1.6" stroke-dasharray="5 3"/>
+
+  <!-- 초과 표시 -->
+  <line x1="500" y1="310" x2="900" y2="310" stroke="#b3261e" stroke-width="1.6" marker-end="url(#ax)"/>
+  <line x1="500" y1="304" x2="500" y2="316" stroke="#b3261e" stroke-width="1.6"/>
+
+  <line x1="40" y1="334" x2="900" y2="334" stroke="#dcdcd4"/>
+  <text x="40" y="356" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11.5" fill="#3d3d35">
+    <tspan font-weight="700">같은 인터페이스에서 요청과 응답이 서로 다른 크기를 말한다.</tspan> 컨트롤러가 <tspan font-family="ui-monospace,Menlo,monospace">ARSIZE</tspan> 를 보지 않고 모든 beat 을 버스 전폭(32 B)으로 취급한다.
+  </text>
+  <text x="40" y="376" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11.5" fill="#6b6b62">
+    beat 0 의 rdata = <tspan font-family="ui-monospace,Menlo,monospace">offset 0x000 0x008 0x010 0x018</tspan> — 패턴이 자기 주소를 담고 있어 rdata 만으로 어느 오프셋인지 읽힌다.
+  </text>
+</svg>

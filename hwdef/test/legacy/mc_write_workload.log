@@ -1,0 +1,52 @@
+platform ch1 (compiled in)  —  1 ch x 16 bank, window 256 MiB, stride 1024 MiB
+         chanmap=ChRoBaCo (bypass, channel every 4 GiB)  — one channel, so both maps are the same
+
+MC is the WRITE side
+  range   MC +0x000000000 .. +0x0000fffff   1 MiB
+  MC      one address 0x20100000000, blocked
+  direct  16 of 16 (channel, bank) shares, 64 KiB each at most
+  blocks  256 MiB per MC transfer
+
+  step           via       transfers        MB/s
+  -------------- --------- --------- -----------
+  poison         direct           16        3339
+  write payload  MC                1         497   <-- MC WRITE
+  read back      direct           16        2325
+  read-back buffer -> /home/kjy/pim/emulator_top/hwdef/test/legacy/mc_write_readback.bin (1048576 B)
+
+FAIL: 391936 of 1048576 B wrong (37.4%)
+     FIRST DIVERGENCE at channel offset 0x000000010
+       expected  0x10   got 0x00
+       word 0xc5a1700000000000 — the payload from offset 0x000000000
+       expected at  ch0 bank  0  row      0  col  0   direct 0x04000000010   MC 0x20100000010
+       arrived from ch0 bank  0  row      0  col  0
+     NOT a clean tail: 656624 B after +0x000000010 are still correct, so this is damage in places
+
+If a write failed, the H2C engine is latched and every later write will
+fail too until the queues are recycled:
+  sudo ./qdma_queues.sh teardown && sudo ./qdma_queues.sh setup
+
+  violation CSR ch0 ANY: 0x0000   (no violations — every row below should read 0)
+    timing : faw=30 rrd=6 rcd=4 ccd=2 rtp=3 rp=3 wr=4 ras=6
+    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |   REC_WR    | drop |
+         | cnt    max  | cnt    max  | cnt    max  | cnt    max  | cnt    max  |  cnt |
+    -----+-------------+-------------+-------------+-------------+-------------+------+
+       0 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       1 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       2 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       3 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       4 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       5 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       6 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       7 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       8 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+       9 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+      10 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+      11 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+      12 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+      13 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+      14 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+      15 |   0      0  |   0      0  |   0      0  |   0      0  |   0      0  |    0 |
+FAIL
+
+--- 실행: /home/kjy/pim/emulator_top/hwdef/test/emu_mc --write --mib 1 --dump /home/kjy/pim/emulator_top/hwdef/test/legacy/mc_write_readback.bin

@@ -1,0 +1,23 @@
+# open_ila.sh 생성. 10개를 파형 창에 띄운다.  패턴: mc_*.ila
+open_hw_manager
+puts "opening mc_read_axis_ila_0"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_read_axis_ila_0.ila}]
+puts "opening mc_read_axis_ila_1"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_read_axis_ila_1.ila}]
+puts "opening mc_read_axis_ila_2"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_read_axis_ila_2.ila}]
+puts "opening mc_read_axis_ila_3"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_read_axis_ila_3.ila}]
+puts "opening mc_read_axis_ila_4"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_read_axis_ila_4.ila}]
+puts "opening mc_write_axis_ila_0"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_write_axis_ila_0.ila}]
+puts "opening mc_write_axis_ila_1"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_write_axis_ila_1.ila}]
+puts "opening mc_write_axis_ila_2"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_write_axis_ila_2.ila}]
+puts "opening mc_write_axis_ila_3"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_write_axis_ila_3.ila}]
+puts "opening mc_write_axis_ila_4"
+display_hw_ila_data [read_hw_ila_data {/home/kjy/pim/emulator_top/hwdef/test/version1.0/tc1/mc_write_axis_ila_4.ila}]
+puts "10 opened"

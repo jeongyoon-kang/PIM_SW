@@ -1,0 +1,42 @@
+platform ch2 (compiled in)  —  2 ch x 16 bank, window 256 MiB, stride 1024 MiB
+         chanmap=RoChBaCo (interleave, channel every 32 KiB)
+ISR_EWMUL — elementwise product, result lands in a THIRD bank's DRAM
+  L = 32 beats, 512 elements   shared offset row 300 col 0 (bank +0x96000)
+  operands  V[k] = 2.0 (feeder)   W[k] = k+1 (executor)   expect 2(k+1)
+
+  group  0: feed bank  2 -> exec bank  3 -> dst bank  1
+            pu_mask 0x0008  gb_mc_mask 0x0000  route[2]=3 route[3]=1
+  program:
+    EWMUL   00000000000000000000fffffffffffffff08fff000200006840000008004b00
+    EOS     00000000000000000000ffffffffffffffffffff000000008800000008000000
+            PASS: all 512 elements are the product, 21 us
+
+  violation counters were CLEARED before this run (stale ANY from earlier runs was 0x0000)
+
+  violation CSR ch0 ANY: 0x0000   (no violations — every row below should read 0)
+    timing : faw=80 rrd=20 rcd=75 ccd=10 rtp=20 rp=85 wr=140 ras=170
+    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |
+         | cnt    max  | cnt    max  | cnt    max  | cnt    max  |
+    -----+-------------+-------------+-------------+-------------+
+       0 |   0      0  |   0      0  |   0      0  |   0      0  |
+       1 |   0      0  |   0      0  |   0      0  |   0      0  |
+       2 |   0      0  |   0      0  |   0      0  |   0      0  |
+       3 |   0      0  |   0      0  |   0      0  |   0      0  |
+       4 |   0      0  |   0      0  |   0      0  |   0      0  |
+       5 |   0      0  |   0      0  |   0      0  |   0      0  |
+       6 |   0      0  |   0      0  |   0      0  |   0      0  |
+       7 |   0      0  |   0      0  |   0      0  |   0      0  |
+       8 |   0      0  |   0      0  |   0      0  |   0      0  |
+       9 |   0      0  |   0      0  |   0      0  |   0      0  |
+      10 |   0      0  |   0      0  |   0      0  |   0      0  |
+      11 |   0      0  |   0      0  |   0      0  |   0      0  |
+      12 |   0      0  |   0      0  |   0      0  |   0      0  |
+      13 |   0      0  |   0      0  |   0      0  |   0      0  |
+      14 |   0      0  |   0      0  |   0      0  |   0      0  |
+      15 |   0      0  |   0      0  |   0      0  |   0      0  |
+    EWMUL writes DRAM, so RCD_WR / RECOVERY_WR are the interesting ones
+    here — MAC never exercises the write side of the timing model.
+
+PASS
+
+--- 실행: /home/kjy/pim/emulator_top/hwdef/test/emu_ewmul --ch 0 --l 32

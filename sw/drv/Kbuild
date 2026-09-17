@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: MIT
+obj-m     := pim.o
+pim-y     := pim_main.o pim_file.o pim_chunk.o
+ccflags-y := -I$(src)/../include -Wall

@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 730" width="940" height="730"
+     role="img" aria-label="MC normal path 읽기 경로: 호스트에서 NoC M03 을 거쳐 emulator_controller 로 들어가고, cmd_bus 로 16개 bank 에 지시가 가고, bank 의 m_axi 가 NoC 를 통해 HBM 에 닿는다. ILA 슬롯 7 과 2 가 이 경로의 양 끝이며 그 사이는 관측되지 않는다.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b6b62"/>
+    </marker>
+    <marker id="aT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a5f7f"/>
+    </marker>
+  </defs>
+
+  <rect width="940" height="730" fill="#fbfbf9"/>
+
+  <text x="40" y="36" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="18" font-weight="700" fill="#17170f">MC normal path 읽기 — 어디까지 보이는가</text>
+  <text x="40" y="57" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="12" fill="#6b6b62">emu_mc --read / --write 의 MC 접근이 지나는 길</text>
+  <line x1="40" y1="72" x2="900" y2="72" stroke="#dcdcd4"/>
+
+  <!-- 관측 불가 구간 브래킷 -->
+  <path d="M 112 270 L 95 270 L 95 446 L 112 446" stroke="#b06000" stroke-width="1.8" fill="none"/>
+  <text x="78" y="358" text-anchor="middle" transform="rotate(-90 78 358)" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11" font-weight="700" fill="#b06000">ILA 에 안 잡힘</text>
+
+  <!-- 1 host -->
+  <rect x="120" y="96" width="300" height="54" rx="4" fill="#eeeeea" stroke="#c9c9c0"/>
+  <text x="270" y="120" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="13" font-weight="700" fill="#17170f">호스트 · CPM QDMA</text>
+  <text x="270" y="138" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="10" fill="#6b6b62">pwrite / pread 의 파일 오프셋 = AXI 주소</text>
+
+  <!-- 2 noc host side -->
+  <rect x="120" y="190" width="300" height="54" rx="4" fill="#ecebe4" stroke="#b5b5a8"/>
+  <text x="270" y="214" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="13" font-weight="700" fill="#17170f">axi_noc_0</text>
+  <text x="270" y="232" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="10" fill="#6b6b62">S00 · S01 → M03_AXI (4 G aperture)</text>
+
+  <!-- 3 emulator controller -->
+  <rect x="120" y="284" width="300" height="54" rx="4" fill="#eeeeea" stroke="#c9c9c0"/>
+  <text x="270" y="308" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="13" font-weight="700" fill="#17170f">emulator_controller_0</text>
+  <text x="270" y="326" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="10" fill="#6b6b62">s_axi 256 b · 32 bit 주소 · NUM_BANKS 16</text>
+
+  <!-- 4 banks -->
+  <rect x="120" y="378" width="300" height="54" rx="4" fill="#eeeeea" stroke="#c9c9c0"/>
+  <text x="270" y="402" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="13" font-weight="700" fill="#17170f">bank_00 ‥ bank_15</text>
+  <text x="270" y="420" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="10" fill="#6b6b62">16개 · 각자 m_axi 로 HBM 접근</text>
+
+  <!-- 5 noc hbm side -->
+  <rect x="120" y="472" width="300" height="54" rx="4" fill="#ecebe4" stroke="#b5b5a8" stroke-dasharray="6 3"/>
+  <text x="270" y="496" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="13" font-weight="700" fill="#17170f">axi_noc_0 (같은 IP)</text>
+  <text x="270" y="514" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="10" fill="#6b6b62">HBM00_AXI ‥ HBM15_AXI</text>
+
+  <!-- 6 hbm -->
+  <rect x="120" y="566" width="300" height="54" rx="4" fill="#ecebe4" stroke="#b5b5a8"/>
+  <text x="270" y="590" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="13" font-weight="700" fill="#17170f">HBM</text>
+  <text x="270" y="608" text-anchor="middle" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="10" fill="#6b6b62">8 stack · 16 GiB</text>
+
+  <!-- arrows -->
+  <g stroke="#6b6b62" stroke-width="1.8" fill="none">
+    <line x1="270" y1="150" x2="270" y2="186" marker-end="url(#a)"/>
+    <line x1="270" y1="244" x2="270" y2="280" marker-end="url(#a)"/>
+    <line x1="270" y1="432" x2="270" y2="468" marker-end="url(#a)"/>
+    <line x1="270" y1="526" x2="270" y2="562" marker-end="url(#a)"/>
+  </g>
+  <line x1="270" y1="338" x2="270" y2="374" stroke="#1a5f7f" stroke-width="2" fill="none" marker-end="url(#aT)"/>
+
+  <!-- badges -->
+  <g font-family="system-ui,sans-serif" font-size="10.5" font-weight="700">
+    <rect x="255" y="253" width="30" height="17" rx="8" fill="#efe7f7" stroke="#6b3fa0"/>
+    <text x="270" y="266" text-anchor="middle" fill="#55308a">7</text>
+    <rect x="255" y="441" width="30" height="17" rx="8" fill="#efe7f7" stroke="#6b3fa0"/>
+    <text x="270" y="454" text-anchor="middle" fill="#55308a">2</text>
+  </g>
+
+  <!-- right-side labels -->
+  <g font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11" fill="#3d3d35">
+    <text x="445" y="164">호스트가 지정한 주소</text>
+    <text x="445" y="180" font-family="ui-monospace,Menlo,monospace" font-size="10.5" fill="#6b6b62">0x201_0000_0000 + off</text>
+
+    <text x="445" y="258" font-weight="700">M03_AXI → s_axi</text>
+    <text x="445" y="274" font-size="10.5" fill="#55308a">슬롯 7 — 호스트 요청과 응답이 둘 다 보인다</text>
+
+    <text x="445" y="352" font-weight="700" fill="#1a5f7f">cmd_bus 44 b</text>
+    <text x="445" y="368" font-size="10.5" fill="#6b6b62">AXI 가 아니다 · 16 bank 에 방송</text>
+
+    <text x="445" y="446" font-weight="700">m_axi → HBM00‥15_AXI</text>
+    <text x="445" y="462" font-family="ui-monospace,Menlo,monospace" font-size="10.5" fill="#6b6b62">0x40_0000_0000 + b×1 GiB</text>
+    <text x="445" y="478" font-size="10.5" fill="#55308a">슬롯 2 는 bank_00, 슬롯 3 은 bank_01 만</text>
+
+    <text x="445" y="548">HBM 채널</text>
+  </g>
+
+  <!-- bottom notes -->
+  <line x1="40" y1="650" x2="900" y2="650" stroke="#dcdcd4"/>
+  <text x="40" y="672" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11.5" fill="#3d3d35">
+    <tspan font-weight="700">슬롯 7 과 2 가 이 경로의 양 끝이다.</tspan> 그 사이 — 컨트롤러 내부, cmd_bus, bank 내부 — 는 어느 슬롯에도 안 잡힌다.
+  </text>
+  <text x="40" y="691" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11.5" fill="#3d3d35">
+    <tspan font-weight="700">슬롯 2 는 컨트롤러의 포트가 아니라 bank_00 의 포트다</tspan> — 거기 보이는 버스트는 컨트롤러가 시킨 <tspan font-style="italic">결과</tspan>다.
+  </text>
+  <text x="40" y="710" font-family="system-ui,-apple-system,'Noto Sans KR',sans-serif" font-size="11.5" fill="#6b6b62">
+    직접 경로(<tspan font-family="ui-monospace,Menlo,monospace">0x40_0000_0000</tspan>)로 가는 호스트 접근은 NoC 안에서 끝나므로 어느 슬롯에도 안 잡힌다.
+  </text>
+</svg>

@@ -1,0 +1,1167 @@
+<title>OPSIZE 가 GEMV 를 어떻게 바꾸는가 — L=1 vs L=32</title>
+<style>
+:root {
+  --bg:        #eaeef2;
+  --surface:   #fbfcfd;
+  --surface-2: #f0f3f6;
+  --ink:       #10171e;
+  --ink-2:     #3d4d5c;
+  --muted:     #67788a;
+  --line:      #ccd6de;
+  --line-soft: #dfe6ec;
+  --amber:     #b4700a;
+  --amber-ink: #8a5607;
+  --amber-bg:  #f6ecd8;
+  --teal:      #10707a;
+  --teal-bg:   #dceff0;
+  --mono: ui-monospace, "SFMono-Regular", "SF Mono", "JetBrains Mono", "IBM Plex Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #0d1319;
+    --surface:   #151d25;
+    --surface-2: #1b242d;
+    --ink:       #e2e9ef;
+    --ink-2:     #b3c1cd;
+    --muted:     #8395a5;
+    --line:      #2b3945;
+    --line-soft: #222e39;
+    --amber:     #e2a53f;
+    --amber-ink: #f0bd68;
+    --amber-bg:  #34281099;
+    --teal:      #45b5bd;
+    --teal-bg:   #10333699;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:        #0d1319;
+  --surface:   #151d25;
+  --surface-2: #1b242d;
+  --ink:       #e2e9ef;
+  --ink-2:     #b3c1cd;
+  --muted:     #8395a5;
+  --line:      #2b3945;
+  --line-soft: #222e39;
+  --amber:     #e2a53f;
+  --amber-ink: #f0bd68;
+  --amber-bg:  #34281099;
+  --teal:      #45b5bd;
+  --teal-bg:   #10333699;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 40px) 96px; }
+
+/* ---- type ---- */
+.eyebrow {
+  font-family: var(--mono); font-size: .7rem; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+}
+h1 {
+  font-family: var(--mono); font-weight: 600;
+  font-size: clamp(1.7rem, 3.6vw, 2.4rem); line-height: 1.18;
+  letter-spacing: -.02em; margin: 0 0 14px; text-wrap: balance;
+}
+h2 {
+  font-family: var(--mono); font-weight: 600; font-size: 1.15rem;
+  letter-spacing: -.01em; margin: 0 0 6px; text-wrap: balance;
+}
+h3 {
+  font-family: var(--mono); font-weight: 600; font-size: .82rem;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  margin: 0 0 10px;
+}
+p { margin: 0 0 14px; max-width: 68ch; color: var(--ink-2); }
+.lede { font-size: 1.06rem; color: var(--ink-2); max-width: 66ch; }
+code, .m { font-family: var(--mono); font-size: .88em; font-variant-numeric: tabular-nums; }
+code { background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 3px; padding: .08em .34em; color: var(--ink); }
+b.amb { color: var(--amber-ink); font-weight: 600; }
+b.tl  { color: var(--teal); font-weight: 600; }
+
+/* ---- header ---- */
+header { border-bottom: 2px solid var(--ink); padding-bottom: 26px; margin-bottom: 34px; }
+.prov {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 20px;
+  font-family: var(--mono); font-size: .72rem; color: var(--muted);
+}
+.prov span { background: var(--surface); border: 1px solid var(--line); border-radius: 2px; padding: 3px 8px; }
+.prov span.pass { color: var(--teal); border-color: var(--teal); }
+
+/* ---- thesis ---- */
+.thesis {
+  background: var(--surface); border: 1px solid var(--line);
+  border-left: 3px solid var(--amber);
+  padding: 20px 24px; margin: 0 0 40px; border-radius: 2px;
+}
+.thesis p { margin: 0; font-size: 1.02rem; }
+
+/* ---- diptych ---- */
+.dip { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-bottom: 40px; }
+@media (max-width: 920px) { .dip { grid-template-columns: 1fr; } }
+.panel {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 3px; padding: 22px 20px 24px; min-width: 0;
+}
+.panel > header { border: 0; padding: 0; margin: 0 0 18px; }
+.shape {
+  font-family: var(--mono); font-size: .95rem; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  border-radius: 2px; padding: 9px 12px; margin-top: 10px;
+  font-variant-numeric: tabular-nums; overflow-x: auto; white-space: nowrap;
+}
+.block { margin-top: 22px; }
+
+/* ---- the tracks: 64 beats wide, always ---- */
+.track {
+  position: relative; height: 15px; background: var(--surface-2);
+  border: 1px solid var(--line);
+  background-image: repeating-linear-gradient(90deg,
+      transparent 0, transparent calc(100% / 64 - 1px),
+      var(--line-soft) calc(100% / 64 - 1px), var(--line-soft) calc(100% / 64));
+  overflow: hidden;
+}
+.fill {
+  position: absolute; inset: 0 auto 0 0; display: block;
+  width: calc(var(--beats) / 64 * 100%);
+  background: var(--amber-bg);
+  border-right: 2px solid var(--amber);
+  background-image: repeating-linear-gradient(90deg,
+      var(--amber) 0, var(--amber) 1px,
+      transparent 1px, transparent calc(100% / var(--beats)));
+}
+.gbfill  { background: var(--teal-bg); border-right-color: var(--teal);
+            background-image: repeating-linear-gradient(90deg,
+              var(--teal) 0, var(--teal) 1px,
+              transparent 1px, transparent calc(100% / var(--beats))); }
+.gprfill { background: var(--teal-bg); border-right-color: var(--teal);
+            background-image: repeating-linear-gradient(90deg,
+              var(--teal) 0, var(--teal) 1px,
+              transparent 1px, transparent calc(100% / var(--beats))); }
+
+.bankgrid { display: flex; flex-direction: column; gap: 3px; }
+.brow { display: grid; grid-template-columns: 3.4em 1fr 6.6em; align-items: center; gap: 9px; }
+.bk { font-family: var(--mono); font-size: .68rem; color: var(--muted); letter-spacing: .04em; }
+.yv {
+  font-family: var(--mono); font-size: .72rem; color: var(--ink);
+  font-variant-numeric: tabular-nums; text-align: right; line-height: 1.25;
+}
+.yv em { display: block; font-style: normal; font-size: .62rem; color: var(--muted); }
+
+.axisrow { display: grid; grid-template-columns: 3.4em 1fr 6.6em; gap: 9px; margin-top: 5px; }
+.axis {
+  grid-column: 2; display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: .62rem; color: var(--muted);
+}
+.caplbl { grid-column: 3; font-family: var(--mono); font-size: .62rem; color: var(--muted); text-align: right; }
+
+.stripwrap { display: grid; grid-template-columns: 3.4em 1fr 6.6em; align-items: center; gap: 9px; }
+.stripwrap .note { font-family: var(--mono); font-size: .66rem; color: var(--muted); text-align: right; }
+
+/* ---- lanes (the result word) ---- */
+.lanes { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; }
+@media (max-width: 520px) { .lanes { grid-template-columns: repeat(4, 1fr); } }
+.lane {
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  padding: 5px 4px; text-align: center; font-family: var(--mono);
+  font-variant-numeric: tabular-nums; min-width: 0;
+}
+.lane .ln { display: block; font-size: .56rem; color: var(--muted); }
+.lane b { display: block; font-size: .74rem; font-weight: 600; color: var(--ink); }
+.lane em { display: block; font-style: normal; font-size: .56rem; color: var(--muted); }
+
+/* ---- tables ---- */
+.tw { overflow-x: auto; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .78rem;
+         font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+th { font-size: .66rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 600;
+      background: var(--surface-2); border-bottom: 1px solid var(--line); }
+tbody tr:last-child td { border-bottom: 0; }
+td.k { color: var(--ink); }
+td.same { color: var(--muted); }
+td.grow { color: var(--amber-ink); font-weight: 600; }
+tr.ell td { color: var(--muted); padding: 2px 14px; }
+
+section { margin-bottom: 42px; }
+.hr { height: 1px; background: var(--line); border: 0; margin: 0 0 42px; }
+
+.diff { background: var(--amber-bg); color: var(--amber-ink); font-weight: 600;
+         padding: 0 2px; border-radius: 2px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px;
+           font-family: var(--mono); font-size: .68rem; color: var(--muted); }
+.legend i { display: inline-block; width: 22px; height: 9px; vertical-align: middle;
+             margin-right: 6px; border: 1px solid var(--line); }
+.legend .sw-a { background: var(--amber-bg); border-right: 2px solid var(--amber); }
+.legend .sw-t { background: var(--teal-bg); border-right: 2px solid var(--teal); }
+.legend .sw-e { background: var(--surface-2); }
+
+/* ---- figures ---- */
+figure { margin: 0; }
+.fig {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 3px;
+  padding: 20px 22px 16px; overflow-x: auto;
+}
+.fig svg { display: block; width: 100%; min-width: 660px; height: auto; color: var(--ink-2); }
+figcaption {
+  font-family: var(--sans); font-size: .87rem; line-height: 1.6;
+  color: var(--muted); margin-top: 12px; max-width: 74ch;
+}
+figcaption b { color: var(--ink-2); font-weight: 600; }
+svg text { font-family: var(--mono); fill: currentColor; }
+.t10 { font-size: 10px; } .t11 { font-size: 11px; } .t12 { font-size: 12px; }
+.t13 { font-size: 13px; font-weight: 600; } .t14 { font-size: 14px; }
+svg .mut     { fill: var(--muted); }
+svg .amb     { fill: var(--amber-ink); }
+svg .teal    { fill: var(--teal); }
+svg .bx      { fill: var(--surface-2); stroke: var(--line);      stroke-width: 1; }
+svg .bxhd    { fill: var(--line-soft); stroke: var(--line);      stroke-width: 1; }
+svg .ambx    { fill: var(--amber-bg);  stroke: var(--amber);     stroke-width: 1; }
+svg .tealbx  { fill: var(--teal-bg);   stroke: var(--teal);      stroke-width: 1; }
+svg .emptybx { fill: none;             stroke: var(--line-soft); stroke-width: 1; }
+svg .hair    { stroke: var(--line); stroke-width: .6; }
+svg .ar      { stroke: currentColor; stroke-width: 1.2; fill: none; }
+svg .pick    { fill: none; stroke: var(--amber); stroke-width: 2; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">emu_gemv &#183; hwdef/test &#183; OPSIZE</p>
+  <h1>OPSIZE 하나가 GEMV 를 어떻게 바꾸는가</h1>
+  <p class="lede">
+    <code>--l 1</code> 과 <code>--l 32</code> 은 ISR 4 워드 중 <b class="amb">OPSIZE 필드 하나</b>만 다르다.
+    그 한 필드가 행렬을 <b class="amb">옆으로</b> 늘리고, 뱅크 안에서 읽히는 DRAM 구간을 늘리고,
+    GB 점유를 늘린다. 그런데 <b class="tl">출력 개수는 둘 다 16</b> 이다. 이 문서는 그 둘을
+    같은 눈높이에 나란히 놓는다.
+  </p>
+  <div class="prov">
+    <span>platform ch2</span>
+    <span>ch0 &#183; 16 bank</span>
+    <span>row 100 &#183; col 0</span>
+    <span>A[k] = 1 + b</span>
+    <span>v[k] = 1.0 &#183; BF16</span>
+    <span>fill = wrvec</span>
+    <span class="pass">측정 2026-09-13 &#183; 32/32 lane PASS</span>
+  </div>
+</header>
+
+<div class="thesis">
+  <p><b class="amb">L 은 행렬을 옆으로만 늘린다.</b>
+  <code>OPSIZE = L</code> 은 DRAM row 안에서 읽어들일 <em>beat 수</em>다.
+  beat 하나가 BF16 16 개이므로 <code>K = 16L</code> 이 되고, 내적의 길이가 늘어난다.
+  세로 — 즉 출력 벡터 <code>y</code> 의 길이 — 는 <b class="tl">뱅크 개수에 묶여 있어서 언제나 16</b> 이고,
+  L 로는 절대 늘어나지 않는다.</p>
+</div>
+
+
+<section>
+  <h2>1 &#183; 데이터가 실제로 흐르는 길</h2>
+  <p>아래는 <code>--l 1</code> 한 번의 doorbell 이다. 숫자는 전부 실측값이다.
+  왼쪽에서 오른쪽이 아니라 <b>위에서 아래로</b> 읽는다 &#8212; 벡터는 GPR 에서 GB 로 한 번 올라가고,
+  거기서 16 뱅크로 <b class="tl">broadcast</b> 되고, 각 뱅크가 <b class="amb">자기 DRAM 행</b>과 곱해
+  자기 누산기에 쌓고, 마지막에 16 개 누산기가 GPR 한 워드의 16 lane 으로 내려온다.</p>
+  <figure>
+    <div class="fig"><svg viewBox="0 0 900 500" role="img" xmlns="http://www.w3.org/2000/svg" aria-label="emu_gemv 의 데이터 경로: GPR 의 벡터가 WRVEC 로 GB 에 올라가고, MAC 이 GB 의 beat 를 16 뱅크에 broadcast 하면 각 뱅크가 자기 DRAM row 와 곱해 누산기에 쌓고, RD_MAC 이 16 개 누산기를 GPR 한 워드의 16 lane 으로 회수한다.">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="450" y="20" text-anchor="middle" class="t12 mut">GPR word 0 &#183; 호스트가 DMA 로 미리 채워둔다</text>
+<rect x="330" y="28" width="240" height="26" class="bx tealbx"/>
+<text x="337.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="345" y1="28" x2="345" y2="54" class="hair"/>
+<text x="352.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="360" y1="28" x2="360" y2="54" class="hair"/>
+<text x="367.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="375" y1="28" x2="375" y2="54" class="hair"/>
+<text x="382.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="390" y1="28" x2="390" y2="54" class="hair"/>
+<text x="397.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="405" y1="28" x2="405" y2="54" class="hair"/>
+<text x="412.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="420" y1="28" x2="420" y2="54" class="hair"/>
+<text x="427.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="435" y1="28" x2="435" y2="54" class="hair"/>
+<text x="442.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="450" y1="28" x2="450" y2="54" class="hair"/>
+<text x="457.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="465" y1="28" x2="465" y2="54" class="hair"/>
+<text x="472.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="480" y1="28" x2="480" y2="54" class="hair"/>
+<text x="487.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="495" y1="28" x2="495" y2="54" class="hair"/>
+<text x="502.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="510" y1="28" x2="510" y2="54" class="hair"/>
+<text x="517.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="525" y1="28" x2="525" y2="54" class="hair"/>
+<text x="532.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="540" y1="28" x2="540" y2="54" class="hair"/>
+<text x="547.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="555" y1="28" x2="555" y2="54" class="hair"/>
+<text x="562.5" y="46" text-anchor="middle" class="t10 teal">1</text>
+<line x1="450" y1="54" x2="450" y2="86" class="ar" marker-end="url(#ah)"/>
+<text x="462" y="74" class="t12">WRVEC</text>
+<text x="518" y="74" class="t11 mut">opsize = L &#183; GB 를 flush 하고 L beat 를 채운다</text>
+<rect x="330" y="90" width="240" height="30" class="bx tealbx"/>
+<text x="337.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="345" y1="90" x2="345" y2="120" class="hair"/>
+<text x="352.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="360" y1="90" x2="360" y2="120" class="hair"/>
+<text x="367.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="375" y1="90" x2="375" y2="120" class="hair"/>
+<text x="382.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="390" y1="90" x2="390" y2="120" class="hair"/>
+<text x="397.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="405" y1="90" x2="405" y2="120" class="hair"/>
+<text x="412.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="420" y1="90" x2="420" y2="120" class="hair"/>
+<text x="427.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="435" y1="90" x2="435" y2="120" class="hair"/>
+<text x="442.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="450" y1="90" x2="450" y2="120" class="hair"/>
+<text x="457.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="465" y1="90" x2="465" y2="120" class="hair"/>
+<text x="472.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="480" y1="90" x2="480" y2="120" class="hair"/>
+<text x="487.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="495" y1="90" x2="495" y2="120" class="hair"/>
+<text x="502.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="510" y1="90" x2="510" y2="120" class="hair"/>
+<text x="517.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="525" y1="90" x2="525" y2="120" class="hair"/>
+<text x="532.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="540" y1="90" x2="540" y2="120" class="hair"/>
+<text x="547.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<line x1="555" y1="90" x2="555" y2="120" class="hair"/>
+<text x="562.5" y="110" text-anchor="middle" class="t10 teal">1</text>
+<text x="322" y="103" text-anchor="end" class="t12 teal">GB</text>
+<text x="322" y="116" text-anchor="end" class="t10 mut">L beat / 64</text>
+<text x="580" y="109" class="t10 mut">1 beat = 256 b = BF16 16 개</text>
+<line x1="450" y1="120" x2="450" y2="150" class="ar"/>
+<line x1="105" y1="150" x2="795" y2="150" class="ar"/>
+<text x="442" y="138" text-anchor="end" class="t11 teal">MAC &#183; gb_mc_mask &#8800; 0 이므로 GB 에서 소싱 &#8594; 16 뱅크 broadcast</text>
+<line x1="105" y1="150" x2="105" y2="176" class="ar" marker-end="url(#ah)"/>
+<line x1="305" y1="150" x2="305" y2="176" class="ar" marker-end="url(#ah)"/>
+<line x1="595" y1="150" x2="595" y2="176" class="ar" marker-end="url(#ah)"/>
+<line x1="795" y1="150" x2="795" y2="176" class="ar" marker-end="url(#ah)"/>
+<rect x="20" y="180" width="170" height="175" class="bx"/>
+<rect x="20" y="180" width="170" height="24" class="bxhd"/>
+<text x="105" y="197" text-anchor="middle" class="t12">bank 0</text>
+<text x="105" y="222" text-anchor="middle" class="t10 mut">DRAM row 100</text>
+<rect x="34" y="230" width="142" height="24" class="bx ambx"/>
+<text x="105" y="247" text-anchor="middle" class="t11 amb">1  1  &#8230;  1</text>
+<text x="105" y="268" text-anchor="middle" class="t10 mut">A 의 행 b &#183; L beat</text>
+<line x1="21" y1="280" x2="189" y2="280" class="hair"/>
+<text x="105" y="299" text-anchor="middle" class="t11 mut">PU</text>
+<rect x="50" y="308" width="110" height="28" class="bx ambx"/>
+<text x="105" y="327" text-anchor="middle" class="t12 amb">acc = 16</text>
+<line x1="105" y1="355" x2="105" y2="404" class="ar" marker-end="url(#ah)"/>
+<rect x="220" y="180" width="170" height="175" class="bx"/>
+<rect x="220" y="180" width="170" height="24" class="bxhd"/>
+<text x="305" y="197" text-anchor="middle" class="t12">bank 1</text>
+<text x="305" y="222" text-anchor="middle" class="t10 mut">DRAM row 100</text>
+<rect x="234" y="230" width="142" height="24" class="bx ambx"/>
+<text x="305" y="247" text-anchor="middle" class="t11 amb">2  2  &#8230;  2</text>
+<text x="305" y="268" text-anchor="middle" class="t10 mut">A 의 행 b &#183; L beat</text>
+<line x1="221" y1="280" x2="389" y2="280" class="hair"/>
+<text x="305" y="299" text-anchor="middle" class="t11 mut">PU</text>
+<rect x="250" y="308" width="110" height="28" class="bx ambx"/>
+<text x="305" y="327" text-anchor="middle" class="t12 amb">acc = 32</text>
+<line x1="305" y1="355" x2="305" y2="404" class="ar" marker-end="url(#ah)"/>
+<rect x="510" y="180" width="170" height="175" class="bx"/>
+<rect x="510" y="180" width="170" height="24" class="bxhd"/>
+<text x="595" y="197" text-anchor="middle" class="t12">bank 14</text>
+<text x="595" y="222" text-anchor="middle" class="t10 mut">DRAM row 100</text>
+<rect x="524" y="230" width="142" height="24" class="bx ambx"/>
+<text x="595" y="247" text-anchor="middle" class="t11 amb">15 15 &#8230; 15</text>
+<text x="595" y="268" text-anchor="middle" class="t10 mut">A 의 행 b &#183; L beat</text>
+<line x1="511" y1="280" x2="679" y2="280" class="hair"/>
+<text x="595" y="299" text-anchor="middle" class="t11 mut">PU</text>
+<rect x="540" y="308" width="110" height="28" class="bx ambx"/>
+<text x="595" y="327" text-anchor="middle" class="t12 amb">acc = 240</text>
+<line x1="595" y1="355" x2="595" y2="404" class="ar" marker-end="url(#ah)"/>
+<rect x="710" y="180" width="170" height="175" class="bx"/>
+<rect x="710" y="180" width="170" height="24" class="bxhd"/>
+<text x="795" y="197" text-anchor="middle" class="t12">bank 15</text>
+<text x="795" y="222" text-anchor="middle" class="t10 mut">DRAM row 100</text>
+<rect x="724" y="230" width="142" height="24" class="bx ambx"/>
+<text x="795" y="247" text-anchor="middle" class="t11 amb">16 16 &#8230; 16</text>
+<text x="795" y="268" text-anchor="middle" class="t10 mut">A 의 행 b &#183; L beat</text>
+<line x1="711" y1="280" x2="879" y2="280" class="hair"/>
+<text x="795" y="299" text-anchor="middle" class="t11 mut">PU</text>
+<rect x="740" y="308" width="110" height="28" class="bx ambx"/>
+<text x="795" y="327" text-anchor="middle" class="t12 amb">acc = 256</text>
+<line x1="795" y1="355" x2="795" y2="404" class="ar" marker-end="url(#ah)"/>
+<text x="450" y="250" text-anchor="middle" class="t14 mut">&#183; &#183; &#183;</text>
+<text x="450" y="273" text-anchor="middle" class="t10 mut">bank 2 &#8230; 13</text>
+<text x="450" y="374" text-anchor="middle" class="t12">RD_MAC</text>
+<text x="450" y="390" text-anchor="middle" class="t10 mut">broadcast &#183; read-clear</text>
+<rect x="20" y="408" width="860" height="34" class="bx ambx"/>
+<text x="46.9" y="430" text-anchor="middle" class="t11 amb">16</text>
+<line x1="73.8" y1="408" x2="73.8" y2="442" class="hair"/>
+<text x="100.7" y="430" text-anchor="middle" class="t11 amb">32</text>
+<line x1="127.5" y1="408" x2="127.5" y2="442" class="hair"/>
+<text x="154.4" y="430" text-anchor="middle" class="t11 amb">48</text>
+<line x1="181.2" y1="408" x2="181.2" y2="442" class="hair"/>
+<text x="208.2" y="430" text-anchor="middle" class="t11 amb">64</text>
+<line x1="235.0" y1="408" x2="235.0" y2="442" class="hair"/>
+<text x="261.9" y="430" text-anchor="middle" class="t11 amb">80</text>
+<line x1="288.8" y1="408" x2="288.8" y2="442" class="hair"/>
+<text x="315.6" y="430" text-anchor="middle" class="t11 amb">96</text>
+<line x1="342.5" y1="408" x2="342.5" y2="442" class="hair"/>
+<text x="369.4" y="430" text-anchor="middle" class="t11 amb">112</text>
+<line x1="396.2" y1="408" x2="396.2" y2="442" class="hair"/>
+<text x="423.1" y="430" text-anchor="middle" class="t11 amb">128</text>
+<line x1="450.0" y1="408" x2="450.0" y2="442" class="hair"/>
+<text x="476.9" y="430" text-anchor="middle" class="t11 amb">144</text>
+<line x1="503.8" y1="408" x2="503.8" y2="442" class="hair"/>
+<text x="530.6" y="430" text-anchor="middle" class="t11 amb">160</text>
+<line x1="557.5" y1="408" x2="557.5" y2="442" class="hair"/>
+<text x="584.4" y="430" text-anchor="middle" class="t11 amb">176</text>
+<line x1="611.2" y1="408" x2="611.2" y2="442" class="hair"/>
+<text x="638.1" y="430" text-anchor="middle" class="t11 amb">192</text>
+<line x1="665.0" y1="408" x2="665.0" y2="442" class="hair"/>
+<text x="691.9" y="430" text-anchor="middle" class="t11 amb">208</text>
+<line x1="718.8" y1="408" x2="718.8" y2="442" class="hair"/>
+<text x="745.6" y="430" text-anchor="middle" class="t11 amb">224</text>
+<line x1="772.5" y1="408" x2="772.5" y2="442" class="hair"/>
+<text x="799.4" y="430" text-anchor="middle" class="t11 amb">240</text>
+<line x1="826.2" y1="408" x2="826.2" y2="442" class="hair"/>
+<text x="853.1" y="430" text-anchor="middle" class="t11 amb">256</text>
+<text x="20" y="458" class="t10 mut">lane 0</text>
+<text x="880" y="458" text-anchor="end" class="t10 mut">lane 15</text>
+<text x="450" y="480" text-anchor="middle" class="t12">GPR word 1041 &#160;=&#160; y &#160;&#183;&#160; <tspan class="mut">lane i 가 bank i, 언제나 16 개</tspan></text>
+</svg></div>
+    <figcaption><b>A 의 행 하나 = 뱅크 하나, y 의 원소 하나 = 그 뱅크의 누산기 하나.</b>
+    이 대응이 이 하드웨어 GEMV 의 전부다. 벡터만 공유되므로 DRAM 이 아니라 GB 에 올라가고,
+    그래서 WRVEC 는 뱅크 명령을 하나도 내보내지 않는다.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>2 &#183; 한 뱅크 안에서 L 이 늘리는 것</h2>
+  <p>위 그림을 뱅크 하나로 확대하면 L 이 어디에 들어가는지 보인다. MAC 은 beat 를 하나 꺼내
+  16 개 곱을 만들고 누산기에 더하는 일을 <b class="amb">L 번</b> 반복한다.</p>
+  <figure>
+    <div class="fig"><svg viewBox="0 0 900 302" role="img" xmlns="http://www.w3.org/2000/svg" aria-label="한 뱅크 안에서 L 이 무엇을 늘리는가: MAC 은 beat 를 하나씩 L 번 꺼내 16 개 곱을 만들고 같은 누산기 하나에 순차로 더한다. 반복 횟수가 L 이고, 누산기 개수는 뱅크당 1 개로 고정이라 출력은 16 에 묶인다.">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="40" y="44" class="t11 teal">GB &#183; beat j</text>
+<rect x="40" y="52" width="208" height="26" class="bx tealbx"/>
+<text x="53" y="70" text-anchor="middle" class="t10 teal">1</text>
+<line x1="66" y1="52" x2="66" y2="78" class="hair"/>
+<text x="79" y="70" text-anchor="middle" class="t10 teal">1</text>
+<line x1="92" y1="52" x2="92" y2="78" class="hair"/>
+<text x="105" y="70" text-anchor="middle" class="t10 teal">1</text>
+<line x1="118" y1="52" x2="118" y2="78" class="hair"/>
+<text x="131" y="70" text-anchor="middle" class="t10 teal">1</text>
+<line x1="144" y1="52" x2="144" y2="78" class="hair"/>
+<text x="157" y="70" text-anchor="middle" class="t10 teal">1</text>
+<line x1="170" y1="52" x2="170" y2="78" class="hair"/>
+<text x="183" y="70" text-anchor="middle" class="t10 teal">1</text>
+<line x1="196" y1="52" x2="196" y2="78" class="hair"/>
+<text x="209" y="70" text-anchor="middle" class="t10 teal">1</text>
+<line x1="222" y1="52" x2="222" y2="78" class="hair"/>
+<text x="235" y="70" text-anchor="middle" class="t10 teal">1</text>
+<rect x="92" y="52" width="26" height="26" class="pick"/>
+<text x="40" y="94" class="t10 mut">beat 0 &#8230; L&#8722;1</text>
+<text x="40" y="144" class="t11 amb">bank b &#183; DRAM row 100, beat j</text>
+<rect x="40" y="152" width="208" height="26" class="bx ambx"/>
+<text x="53" y="170" text-anchor="middle" class="t10 amb">2</text>
+<line x1="66" y1="152" x2="66" y2="178" class="hair"/>
+<text x="79" y="170" text-anchor="middle" class="t10 amb">2</text>
+<line x1="92" y1="152" x2="92" y2="178" class="hair"/>
+<text x="105" y="170" text-anchor="middle" class="t10 amb">2</text>
+<line x1="118" y1="152" x2="118" y2="178" class="hair"/>
+<text x="131" y="170" text-anchor="middle" class="t10 amb">2</text>
+<line x1="144" y1="152" x2="144" y2="178" class="hair"/>
+<text x="157" y="170" text-anchor="middle" class="t10 amb">2</text>
+<line x1="170" y1="152" x2="170" y2="178" class="hair"/>
+<text x="183" y="170" text-anchor="middle" class="t10 amb">2</text>
+<line x1="196" y1="152" x2="196" y2="178" class="hair"/>
+<text x="209" y="170" text-anchor="middle" class="t10 amb">2</text>
+<line x1="222" y1="152" x2="222" y2="178" class="hair"/>
+<text x="235" y="170" text-anchor="middle" class="t10 amb">2</text>
+<rect x="92" y="152" width="26" height="26" class="pick"/>
+<text x="40" y="194" class="t10 mut">ROW&#215;2048 + j&#215;32</text>
+<line x1="248" y1="65" x2="330" y2="112" class="ar" marker-end="url(#ah)"/>
+<line x1="248" y1="165" x2="330" y2="128" class="ar" marker-end="url(#ah)"/>
+<rect x="336" y="96" width="126" height="48" class="bx"/>
+<text x="399" y="117" text-anchor="middle" class="t12">&#215; 16 lane</text>
+<text x="399" y="133" text-anchor="middle" class="t10 mut">곱은 정확</text>
+<line x1="462" y1="120" x2="512" y2="120" class="ar" marker-end="url(#ah)"/>
+<rect x="518" y="96" width="150" height="48" class="bx"/>
+<text x="593" y="117" text-anchor="middle" class="t12">+ 순차 누산</text>
+<text x="593" y="133" text-anchor="middle" class="t10 mut">lane 순서, BF16 보다 넓게</text>
+<line x1="668" y1="120" x2="718" y2="120" class="ar" marker-end="url(#ah)"/>
+<rect x="724" y="96" width="140" height="48" class="bx ambx"/>
+<text x="794" y="117" text-anchor="middle" class="t12 amb">acc &#183; 뱅크당 1 개</text>
+<text x="794" y="133" text-anchor="middle" class="t10 mut">RD_MAC 이 read-clear</text>
+<path d="M 794 144 L 794 238 L 22 238 L 22 62 L 32 62" fill="none" class="ar" marker-end="url(#ah)"/>
+<text x="300" y="224" class="t12 amb">j = j+1</text>
+<text x="368" y="224" class="t11 mut">&#8212; L 이 늘리는 것은 이 반복 횟수뿐이다 (L=1 &#8594; 1 회, L=32 &#8594; 32 회)</text>
+<text x="40" y="276" class="t11 mut">누산기 개수는 L 과 무관하게 뱅크당 1 개다. 그래서 K 를 32 배로 늘려도 출력 y 는 16 개 그대로고, RD_MAC 도 여전히 GPR 한 워드다.</text>
+</svg></div>
+    <figcaption><b>L 은 반복 횟수이지 누산기 개수가 아니다.</b>
+    그래서 K 가 16 에서 512 로 32 배가 되어도 출력은 16 개 그대로고, RD_MAC 도 여전히
+    GPR 한 워드를 채운다. 누산 순서가 lane 순서대로 순차라는 것은 이 보드에서 측정된 사실이다
+    &#8212; adder tree 가 아니다.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>3 &#183; 두 모양을 같은 축척으로</h2>
+  <p>같은 beat 폭으로 겹쳐 그린 것이다. 세로는 두 경우 모두 16 행으로 똑같고,
+  달라지는 건 가로뿐이다. 뒤쪽의 빈 칸은 DRAM row 한 줄 64 beat 중 이번 MAC 이
+  <b>읽지 않는 부분</b>이다.</p>
+  <figure>
+    <div class="fig"><svg viewBox="0 0 814 618" role="img" xmlns="http://www.w3.org/2000/svg" aria-label="L=1 과 L=32 의 GEMV 모양을 같은 beat 축척으로 겹쳐 비교한다. 두 경우 모두 뱅크 16 행과 출력 16 개는 같고, 읽히는 beat 폭만 1 에서 32 로 늘어난다. DRAM row 한 줄의 64 beat 중 L=1 은 1 칸, L=32 는 절반을 쓴다.">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="0" y="22" class="t13">L = 1</text>
+<text x="62" y="22" class="t12 mut">A (16 &#215; 16) &#183; v (16) = y (16)</text>
+<text x="144" y="50" text-anchor="end" class="t11 teal">v</text>
+<rect x="152" y="40" width="8.5" height="13" class="bx tealbx"/>
+<rect x="152" y="66" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="66" width="535.5" height="13" class="bx emptybx"/>
+<text x="144" y="76" text-anchor="end" class="t10 mut">bank 0</text>
+<rect x="718.0" y="66" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="76" text-anchor="end" class="t10 amb">16</text>
+<rect x="152" y="79" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="79" width="535.5" height="13" class="bx emptybx"/>
+<text x="144" y="89" text-anchor="end" class="t10 mut">bank 1</text>
+<rect x="718.0" y="79" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="89" text-anchor="end" class="t10 amb">32</text>
+<rect x="152" y="92" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="92" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="92" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="102" text-anchor="end" class="t10 amb">48</text>
+<rect x="152" y="105" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="105" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="105" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="115" text-anchor="end" class="t10 amb">64</text>
+<rect x="152" y="118" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="118" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="118" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="128" text-anchor="end" class="t10 amb">80</text>
+<rect x="152" y="131" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="131" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="131" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="141" text-anchor="end" class="t10 amb">96</text>
+<rect x="152" y="144" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="144" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="144" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="154" text-anchor="end" class="t10 amb">112</text>
+<rect x="152" y="157" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="157" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="157" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="167" text-anchor="end" class="t10 amb">128</text>
+<rect x="152" y="170" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="170" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="170" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="180" text-anchor="end" class="t10 amb">144</text>
+<rect x="152" y="183" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="183" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="183" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="193" text-anchor="end" class="t10 amb">160</text>
+<rect x="152" y="196" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="196" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="196" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="206" text-anchor="end" class="t10 amb">176</text>
+<rect x="152" y="209" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="209" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="209" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="219" text-anchor="end" class="t10 amb">192</text>
+<rect x="152" y="222" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="222" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="222" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="232" text-anchor="end" class="t10 amb">208</text>
+<rect x="152" y="235" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="235" width="535.5" height="13" class="bx emptybx"/>
+<rect x="718.0" y="235" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="245" text-anchor="end" class="t10 amb">224</text>
+<rect x="152" y="248" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="248" width="535.5" height="13" class="bx emptybx"/>
+<text x="144" y="258" text-anchor="end" class="t10 mut">bank 14</text>
+<rect x="718.0" y="248" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="258" text-anchor="end" class="t10 amb">240</text>
+<rect x="152" y="261" width="8.5" height="13" class="bx ambx"/>
+<rect x="160.5" y="261" width="535.5" height="13" class="bx emptybx"/>
+<text x="144" y="271" text-anchor="end" class="t10 mut">bank 15</text>
+<rect x="718.0" y="261" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="271" text-anchor="end" class="t10 amb">256</text>
+<text x="144" y="167" text-anchor="end" class="t10 mut">&#8942;</text>
+<text x="152" y="289" class="t10 mut">k = 0</text>
+<text x="696" y="289" text-anchor="end" class="t10 mut">beat 63 &#183; row 끝 (2048 B) &#183; 이번 MAC 이 읽지 않는 구간</text>
+<text x="718.0" y="50" class="t11 amb">y</text>
+<text x="180.0" y="35" text-anchor="middle" class="t10 amb">1 beat &#183; K = 16</text>
+<text x="0" y="332" class="t13">L = 32</text>
+<text x="62" y="332" class="t12 mut">A (16 &#215; 512) &#183; v (512) = y (16)</text>
+<text x="144" y="360" text-anchor="end" class="t11 teal">v</text>
+<rect x="152" y="350" width="272.0" height="13" class="bx tealbx"/>
+<line x1="160.5" y1="350" x2="160.5" y2="363" class="hair"/>
+<line x1="169.0" y1="350" x2="169.0" y2="363" class="hair"/>
+<line x1="177.5" y1="350" x2="177.5" y2="363" class="hair"/>
+<line x1="186.0" y1="350" x2="186.0" y2="363" class="hair"/>
+<line x1="194.5" y1="350" x2="194.5" y2="363" class="hair"/>
+<line x1="203.0" y1="350" x2="203.0" y2="363" class="hair"/>
+<line x1="211.5" y1="350" x2="211.5" y2="363" class="hair"/>
+<line x1="220.0" y1="350" x2="220.0" y2="363" class="hair"/>
+<line x1="228.5" y1="350" x2="228.5" y2="363" class="hair"/>
+<line x1="237.0" y1="350" x2="237.0" y2="363" class="hair"/>
+<line x1="245.5" y1="350" x2="245.5" y2="363" class="hair"/>
+<line x1="254.0" y1="350" x2="254.0" y2="363" class="hair"/>
+<line x1="262.5" y1="350" x2="262.5" y2="363" class="hair"/>
+<line x1="271.0" y1="350" x2="271.0" y2="363" class="hair"/>
+<line x1="279.5" y1="350" x2="279.5" y2="363" class="hair"/>
+<line x1="288.0" y1="350" x2="288.0" y2="363" class="hair"/>
+<line x1="296.5" y1="350" x2="296.5" y2="363" class="hair"/>
+<line x1="305.0" y1="350" x2="305.0" y2="363" class="hair"/>
+<line x1="313.5" y1="350" x2="313.5" y2="363" class="hair"/>
+<line x1="322.0" y1="350" x2="322.0" y2="363" class="hair"/>
+<line x1="330.5" y1="350" x2="330.5" y2="363" class="hair"/>
+<line x1="339.0" y1="350" x2="339.0" y2="363" class="hair"/>
+<line x1="347.5" y1="350" x2="347.5" y2="363" class="hair"/>
+<line x1="356.0" y1="350" x2="356.0" y2="363" class="hair"/>
+<line x1="364.5" y1="350" x2="364.5" y2="363" class="hair"/>
+<line x1="373.0" y1="350" x2="373.0" y2="363" class="hair"/>
+<line x1="381.5" y1="350" x2="381.5" y2="363" class="hair"/>
+<line x1="390.0" y1="350" x2="390.0" y2="363" class="hair"/>
+<line x1="398.5" y1="350" x2="398.5" y2="363" class="hair"/>
+<line x1="407.0" y1="350" x2="407.0" y2="363" class="hair"/>
+<line x1="415.5" y1="350" x2="415.5" y2="363" class="hair"/>
+<rect x="152" y="376" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="376" width="272.0" height="13" class="bx emptybx"/>
+<text x="144" y="386" text-anchor="end" class="t10 mut">bank 0</text>
+<rect x="718.0" y="376" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="386" text-anchor="end" class="t10 amb">512</text>
+<rect x="152" y="389" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="389" width="272.0" height="13" class="bx emptybx"/>
+<text x="144" y="399" text-anchor="end" class="t10 mut">bank 1</text>
+<rect x="718.0" y="389" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="399" text-anchor="end" class="t10 amb">1,024</text>
+<rect x="152" y="402" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="402" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="402" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="412" text-anchor="end" class="t10 amb">1,536</text>
+<rect x="152" y="415" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="415" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="415" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="425" text-anchor="end" class="t10 amb">2,048</text>
+<rect x="152" y="428" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="428" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="428" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="438" text-anchor="end" class="t10 amb">2,560</text>
+<rect x="152" y="441" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="441" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="441" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="451" text-anchor="end" class="t10 amb">3,072</text>
+<rect x="152" y="454" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="454" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="454" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="464" text-anchor="end" class="t10 amb">3,584</text>
+<rect x="152" y="467" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="467" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="467" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="477" text-anchor="end" class="t10 amb">4,096</text>
+<rect x="152" y="480" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="480" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="480" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="490" text-anchor="end" class="t10 amb">4,608</text>
+<rect x="152" y="493" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="493" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="493" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="503" text-anchor="end" class="t10 amb">5,120</text>
+<rect x="152" y="506" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="506" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="506" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="516" text-anchor="end" class="t10 amb">5,632</text>
+<rect x="152" y="519" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="519" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="519" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="529" text-anchor="end" class="t10 amb">6,144</text>
+<rect x="152" y="532" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="532" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="532" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="542" text-anchor="end" class="t10 amb">6,656</text>
+<rect x="152" y="545" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="545" width="272.0" height="13" class="bx emptybx"/>
+<rect x="718.0" y="545" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="555" text-anchor="end" class="t10 amb">7,168</text>
+<rect x="152" y="558" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="558" width="272.0" height="13" class="bx emptybx"/>
+<text x="144" y="568" text-anchor="end" class="t10 mut">bank 14</text>
+<rect x="718.0" y="558" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="568" text-anchor="end" class="t10 amb">7,680</text>
+<rect x="152" y="571" width="272.0" height="13" class="bx ambx"/>
+<rect x="424.0" y="571" width="272.0" height="13" class="bx emptybx"/>
+<text x="144" y="581" text-anchor="end" class="t10 mut">bank 15</text>
+<rect x="718.0" y="571" width="74" height="13" class="bx ambx"/>
+<text x="786.0" y="581" text-anchor="end" class="t10 amb">8,192</text>
+<text x="144" y="477" text-anchor="end" class="t10 mut">&#8942;</text>
+<line x1="160.5" y1="376" x2="160.5" y2="584" class="hair"/>
+<line x1="169.0" y1="376" x2="169.0" y2="584" class="hair"/>
+<line x1="177.5" y1="376" x2="177.5" y2="584" class="hair"/>
+<line x1="186.0" y1="376" x2="186.0" y2="584" class="hair"/>
+<line x1="194.5" y1="376" x2="194.5" y2="584" class="hair"/>
+<line x1="203.0" y1="376" x2="203.0" y2="584" class="hair"/>
+<line x1="211.5" y1="376" x2="211.5" y2="584" class="hair"/>
+<line x1="220.0" y1="376" x2="220.0" y2="584" class="hair"/>
+<line x1="228.5" y1="376" x2="228.5" y2="584" class="hair"/>
+<line x1="237.0" y1="376" x2="237.0" y2="584" class="hair"/>
+<line x1="245.5" y1="376" x2="245.5" y2="584" class="hair"/>
+<line x1="254.0" y1="376" x2="254.0" y2="584" class="hair"/>
+<line x1="262.5" y1="376" x2="262.5" y2="584" class="hair"/>
+<line x1="271.0" y1="376" x2="271.0" y2="584" class="hair"/>
+<line x1="279.5" y1="376" x2="279.5" y2="584" class="hair"/>
+<line x1="288.0" y1="376" x2="288.0" y2="584" class="hair"/>
+<line x1="296.5" y1="376" x2="296.5" y2="584" class="hair"/>
+<line x1="305.0" y1="376" x2="305.0" y2="584" class="hair"/>
+<line x1="313.5" y1="376" x2="313.5" y2="584" class="hair"/>
+<line x1="322.0" y1="376" x2="322.0" y2="584" class="hair"/>
+<line x1="330.5" y1="376" x2="330.5" y2="584" class="hair"/>
+<line x1="339.0" y1="376" x2="339.0" y2="584" class="hair"/>
+<line x1="347.5" y1="376" x2="347.5" y2="584" class="hair"/>
+<line x1="356.0" y1="376" x2="356.0" y2="584" class="hair"/>
+<line x1="364.5" y1="376" x2="364.5" y2="584" class="hair"/>
+<line x1="373.0" y1="376" x2="373.0" y2="584" class="hair"/>
+<line x1="381.5" y1="376" x2="381.5" y2="584" class="hair"/>
+<line x1="390.0" y1="376" x2="390.0" y2="584" class="hair"/>
+<line x1="398.5" y1="376" x2="398.5" y2="584" class="hair"/>
+<line x1="407.0" y1="376" x2="407.0" y2="584" class="hair"/>
+<line x1="415.5" y1="376" x2="415.5" y2="584" class="hair"/>
+<text x="152" y="599" class="t10 mut">k = 0</text>
+<text x="696" y="599" text-anchor="end" class="t10 mut">beat 63 &#183; row 끝 (2048 B) &#183; 이번 MAC 이 읽지 않는 구간</text>
+<text x="718.0" y="360" class="t11 amb">y</text>
+<text x="288.0" y="345" text-anchor="middle" class="t10 amb">32 beat &#183; K = 512</text>
+</svg></div>
+    <figcaption><b>L=1 은 2048 B row 의 64 분의 1 만, L=32 는 정확히 절반을 읽는다.</b>
+    v 가 A 의 가로축에 정렬돼 있는 것에 주의 &#8212; 내적은 가로로 진행하고, 세로는
+    병렬이다. 오른쪽 <b class="amb">y</b> 열이 실측 결과이고, L=32 의 값이 정확히 32 배인 것은
+    이 테스트의 A 가 k 에 무관한 상수이기 때문이다.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>4 &#183; 채널을 넘기면 &#8212; 수식 그대로의 행렬곱 뷰</h2>
+  <p>여기까지는 채널 하나였다. <code>--chs 0,1</code> 로 두 채널을 한 프로그램에 담으면
+  <b class="amb">A 가 32 행</b>이 되고 <b class="amb">y 도 32 개</b>가 된다. 아래는 앞의 그림들과 달리
+  beat 축척이 아니라 <b>수식 그대로</b> 그린 것이다 &#8212; 그래서 <code>v</code> 도 가로 띠가 아니라
+  길이 K 의 열벡터로 서 있다.</p>
+  <figure>
+    <div class="fig"><svg viewBox="0 0 930 520" role="img" xmlns="http://www.w3.org/2000/svg" aria-label="두 채널을 한 프로그램으로 도는 GEMV: A 는 32행이 되고 y 도 32개가 된다. WRVEC 와 MAC 은 CH_MASK 0x3 으로 한 발씩만 나가 두 채널을 모두 덮지만, RD_MAC 은 1-hot 이어야 하므로 채널마다 한 발씩 GPR 워드 1041 과 1042 로 따로 회수한다.">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<path d="M 30 62 L 22 62 L 22 446 L 30 446" fill="none" class="ar"/>
+<text x="16" y="36" class="t12 teal">WRVEC &#183; MAC</text>
+<text x="16" y="50" class="t10 mut">CH_MASK = 0x3 &#183; 각각 한 발로 32 행 전부</text>
+<path d="M 133 62 L 124 62 L 124 446 L 133 446" fill="none" class="ar"/>
+<path d="M 503 62 L 512 62 L 512 446 L 503 446" fill="none" class="ar"/>
+<rect x="132" y="62" width="372" height="12" class="bx ambx"/>
+<text x="318" y="71" text-anchor="middle" class="t10 amb">1 &#160;1 &#160;1 &#160;&#8230;&#160; 1</text>
+<text x="116" y="71" text-anchor="end" class="t10 mut">ch0 b0</text>
+<rect x="132" y="74" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="86" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="98" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="110" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="122" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="134" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="146" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="158" width="372" height="12" class="bx ambx"/>
+<text x="318" y="167" text-anchor="middle" class="t10 mut">&#8942;</text>
+<text x="116" y="167" text-anchor="end" class="t10 mut">&#8942;</text>
+<rect x="132" y="170" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="182" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="194" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="206" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="218" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="230" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="242" width="372" height="12" class="bx ambx"/>
+<text x="318" y="251" text-anchor="middle" class="t10 amb">16 &#160;16 &#160;16 &#160;&#8230;&#160; 16</text>
+<text x="116" y="251" text-anchor="end" class="t10 mut">ch0 b15</text>
+<rect x="132" y="254" width="372" height="12" class="bx ambx"/>
+<text x="318" y="263" text-anchor="middle" class="t10 amb">17 &#160;17 &#160;17 &#160;&#8230;&#160; 17</text>
+<text x="116" y="263" text-anchor="end" class="t10 mut">ch1 b0</text>
+<rect x="132" y="266" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="278" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="290" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="302" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="314" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="326" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="338" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="350" width="372" height="12" class="bx ambx"/>
+<text x="318" y="359" text-anchor="middle" class="t10 mut">&#8942;</text>
+<text x="116" y="359" text-anchor="end" class="t10 mut">&#8942;</text>
+<rect x="132" y="362" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="374" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="386" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="398" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="410" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="422" width="372" height="12" class="bx ambx"/>
+<rect x="132" y="434" width="372" height="12" class="bx ambx"/>
+<text x="318" y="443" text-anchor="middle" class="t10 amb">32 &#160;32 &#160;32 &#160;&#8230;&#160; 32</text>
+<text x="116" y="443" text-anchor="end" class="t10 mut">ch1 b15</text>
+<text x="318" y="462" text-anchor="middle" class="t10 mut">A &#183; 32 &#215; K &#160;&#183;&#160; A[c][b][k] = base + 16c + b</text>
+<line x1="132" y1="254" x2="504" y2="254" class="ar"/>
+<text x="534" y="258" text-anchor="middle" class="t14">&#183;</text>
+<path d="M 557 158 L 548 158 L 548 350 L 557 350" fill="none" class="ar"/>
+<path d="M 599 158 L 608 158 L 608 350 L 599 350" fill="none" class="ar"/>
+<rect x="556" y="158" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="167" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="170" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="179" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="182" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="191" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="194" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="203" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="206" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="215" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="218" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="227" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="230" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="239" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="242" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="251" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="254" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="263" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="266" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="275" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="278" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="287" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="290" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="299" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="302" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="311" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="314" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="323" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="326" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="335" text-anchor="middle" class="t10 teal">1</text>
+<rect x="556" y="338" width="44" height="12" class="bx tealbx"/>
+<text x="578" y="347" text-anchor="middle" class="t10 teal">1</text>
+<text x="578" y="150" text-anchor="middle" class="t10 mut">v &#183; K = 16</text>
+<text x="578" y="366" text-anchor="middle" class="t10 mut">채널 공유</text>
+<text x="627" y="259" text-anchor="middle" class="t13">=</text>
+<path d="M 647 62 L 638 62 L 638 446 L 647 446" fill="none" class="ar"/>
+<path d="M 721 62 L 730 62 L 730 446 L 721 446" fill="none" class="ar"/>
+<rect x="646" y="62" width="76" height="12" class="bx ambx"/>
+<text x="716" y="71" text-anchor="end" class="t10 amb">16</text>
+<rect x="646" y="74" width="76" height="12" class="bx ambx"/>
+<text x="716" y="83" text-anchor="end" class="t10 amb">32</text>
+<rect x="646" y="86" width="76" height="12" class="bx ambx"/>
+<text x="716" y="95" text-anchor="end" class="t10 amb">48</text>
+<rect x="646" y="98" width="76" height="12" class="bx ambx"/>
+<text x="716" y="107" text-anchor="end" class="t10 amb">64</text>
+<rect x="646" y="110" width="76" height="12" class="bx ambx"/>
+<text x="716" y="119" text-anchor="end" class="t10 amb">80</text>
+<rect x="646" y="122" width="76" height="12" class="bx ambx"/>
+<text x="716" y="131" text-anchor="end" class="t10 amb">96</text>
+<rect x="646" y="134" width="76" height="12" class="bx ambx"/>
+<text x="716" y="143" text-anchor="end" class="t10 amb">112</text>
+<rect x="646" y="146" width="76" height="12" class="bx ambx"/>
+<text x="716" y="155" text-anchor="end" class="t10 amb">128</text>
+<rect x="646" y="158" width="76" height="12" class="bx ambx"/>
+<text x="716" y="167" text-anchor="end" class="t10 amb">144</text>
+<rect x="646" y="170" width="76" height="12" class="bx ambx"/>
+<text x="716" y="179" text-anchor="end" class="t10 amb">160</text>
+<rect x="646" y="182" width="76" height="12" class="bx ambx"/>
+<text x="716" y="191" text-anchor="end" class="t10 amb">176</text>
+<rect x="646" y="194" width="76" height="12" class="bx ambx"/>
+<text x="716" y="203" text-anchor="end" class="t10 amb">192</text>
+<rect x="646" y="206" width="76" height="12" class="bx ambx"/>
+<text x="716" y="215" text-anchor="end" class="t10 amb">208</text>
+<rect x="646" y="218" width="76" height="12" class="bx ambx"/>
+<text x="716" y="227" text-anchor="end" class="t10 amb">224</text>
+<rect x="646" y="230" width="76" height="12" class="bx ambx"/>
+<text x="716" y="239" text-anchor="end" class="t10 amb">240</text>
+<rect x="646" y="242" width="76" height="12" class="bx ambx"/>
+<text x="716" y="251" text-anchor="end" class="t10 amb">256</text>
+<rect x="646" y="254" width="76" height="12" class="bx ambx"/>
+<text x="716" y="263" text-anchor="end" class="t10 amb">272</text>
+<rect x="646" y="266" width="76" height="12" class="bx ambx"/>
+<text x="716" y="275" text-anchor="end" class="t10 amb">288</text>
+<rect x="646" y="278" width="76" height="12" class="bx ambx"/>
+<text x="716" y="287" text-anchor="end" class="t10 amb">304</text>
+<rect x="646" y="290" width="76" height="12" class="bx ambx"/>
+<text x="716" y="299" text-anchor="end" class="t10 amb">320</text>
+<rect x="646" y="302" width="76" height="12" class="bx ambx"/>
+<text x="716" y="311" text-anchor="end" class="t10 amb">336</text>
+<rect x="646" y="314" width="76" height="12" class="bx ambx"/>
+<text x="716" y="323" text-anchor="end" class="t10 amb">352</text>
+<rect x="646" y="326" width="76" height="12" class="bx ambx"/>
+<text x="716" y="335" text-anchor="end" class="t10 amb">368</text>
+<rect x="646" y="338" width="76" height="12" class="bx ambx"/>
+<text x="716" y="347" text-anchor="end" class="t10 amb">384</text>
+<rect x="646" y="350" width="76" height="12" class="bx ambx"/>
+<text x="716" y="359" text-anchor="end" class="t10 amb">400</text>
+<rect x="646" y="362" width="76" height="12" class="bx ambx"/>
+<text x="716" y="371" text-anchor="end" class="t10 amb">416</text>
+<rect x="646" y="374" width="76" height="12" class="bx ambx"/>
+<text x="716" y="383" text-anchor="end" class="t10 amb">432</text>
+<rect x="646" y="386" width="76" height="12" class="bx ambx"/>
+<text x="716" y="395" text-anchor="end" class="t10 amb">448</text>
+<rect x="646" y="398" width="76" height="12" class="bx ambx"/>
+<text x="716" y="407" text-anchor="end" class="t10 amb">464</text>
+<rect x="646" y="410" width="76" height="12" class="bx ambx"/>
+<text x="716" y="419" text-anchor="end" class="t10 amb">480</text>
+<rect x="646" y="422" width="76" height="12" class="bx ambx"/>
+<text x="716" y="431" text-anchor="end" class="t10 amb">496</text>
+<rect x="646" y="434" width="76" height="12" class="bx ambx"/>
+<text x="716" y="443" text-anchor="end" class="t10 amb">512</text>
+<text x="684" y="462" text-anchor="middle" class="t10 mut">y &#183; 32</text>
+<line x1="646" y1="254" x2="722" y2="254" class="ar"/>
+<path d="M 740 62 L 748 62 L 748 254 L 740 254" fill="none" class="ar"/>
+<text x="756" y="154" class="t11">RD_MAC &#183; CH_MASK 0x1</text>
+<text x="756" y="169" class="t10 mut">1-hot &#8594; GPR word 1041</text>
+<path d="M 740 254 L 748 254 L 748 446 L 740 446" fill="none" class="ar"/>
+<text x="756" y="346" class="t11">RD_MAC &#183; CH_MASK 0x2</text>
+<text x="756" y="361" class="t10 mut">1-hot &#8594; GPR word 1042</text>
+<text x="16" y="492" class="t11 mut">한 프로그램이 5 워드가 된다: WRVEC(0x3) &#183; MAC(0x3) &#183; RD_MAC(0x1) &#183; RD_MAC(0x2) &#183; EOS. 채우기와 계산은 한 발로 두 채널을 덮지만,</text>
+<text x="16" y="508" class="t11 mut">회수만은 채널마다 한 발이다 &#8212; 멀티캐스트 RD_MAC 은 두 채널이 같은 GPR 워드에 써서 한쪽이 조용히 사라지므로 emu_isr_check 가 거부한다.</text>
+</svg></div>
+    <figcaption><b>채우기와 계산은 멀티캐스트, 회수는 아니다.</b>
+    WRVEC 와 MAC 은 <code>CH_MASK=0x3</code> 으로 한 발씩만 나가 두 채널을 모두 덮는다 &#8212;
+    벡터는 GPR 에 한 번만 쓰면 되고 복제가 필요 없다. 반면 RD_MAC 은 1-hot 이어야 해서
+    채널마다 한 발씩, 연속한 GPR 워드로 따로 내려온다. 그래서 프로그램이 4 워드가 아니라
+    5 워드다. 32 개 값이 전부 다른 것은 의도된 것으로, 채널이 실행되지 않았거나 결과가
+    남의 워드에 착지한 경우가 우연히 맞아떨어져 통과할 수 없게 한다.</figcaption>
+  </figure>
+</section>
+
+<hr class="hr">
+
+<div class="dip">
+
+  <!-- ================= L = 1 ================= -->
+  <div class="panel">
+    <header>
+      <h2>L = 1</h2>
+      <div class="shape">y(16) = A(16 &#215; 16) &#183; v(16)</div>
+    </header>
+
+    <div class="block">
+      <h3>뱅크별 DRAM row 100 &#183; 64 beat 중</h3>
+      <div class="brow"><span class="bk">bk00</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">16<em>0x4180</em></span></div>
+<div class="brow"><span class="bk">bk01</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">32<em>0x4200</em></span></div>
+<div class="brow"><span class="bk">bk02</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">48<em>0x4240</em></span></div>
+<div class="brow"><span class="bk">bk03</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">64<em>0x4280</em></span></div>
+<div class="brow"><span class="bk">bk04</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">80<em>0x42a0</em></span></div>
+<div class="brow"><span class="bk">bk05</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">96<em>0x42c0</em></span></div>
+<div class="brow"><span class="bk">bk06</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">112<em>0x42e0</em></span></div>
+<div class="brow"><span class="bk">bk07</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">128<em>0x4300</em></span></div>
+<div class="brow"><span class="bk">bk08</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">144<em>0x4310</em></span></div>
+<div class="brow"><span class="bk">bk09</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">160<em>0x4320</em></span></div>
+<div class="brow"><span class="bk">bk10</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">176<em>0x4330</em></span></div>
+<div class="brow"><span class="bk">bk11</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">192<em>0x4340</em></span></div>
+<div class="brow"><span class="bk">bk12</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">208<em>0x4350</em></span></div>
+<div class="brow"><span class="bk">bk13</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">224<em>0x4360</em></span></div>
+<div class="brow"><span class="bk">bk14</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">240<em>0x4370</em></span></div>
+<div class="brow"><span class="bk">bk15</span><div class="track"><i class="fill" style="--beats:1"></i></div><span class="yv">256<em>0x4380</em></span></div>
+      <div class="axisrow">
+        <div class="axis"><span>beat 0</span><span>31</span><span>63</span></div>
+        <div class="caplbl">y[b] / BF16</div>
+      </div>
+      <div class="legend">
+        <span><i class="sw-a"></i>읽히는 beat &#183; 1 / 64</span>
+        <span><i class="sw-e"></i>손대지 않음 &#183; 63 / 64</span>
+      </div>
+    </div>
+
+    <div class="block">
+      <h3>Global Buffer &#183; 64 beat 용량</h3>
+      <div class="stripwrap">
+        <span class="bk">GB</span>
+        <div class="track gb"><i class="fill gbfill" style="--beats:1"></i></div>
+        <span class="note">1 / 64</span>
+      </div>
+      <h3 style="margin-top:14px">GPR &#183; WRVEC 가 읽어갈 벡터</h3>
+      <div class="stripwrap">
+        <span class="bk">GPR</span>
+        <div class="track gpr"><i class="fill gprfill" style="--beats:1"></i></div>
+        <span class="note">word 0</span>
+      </div>
+    </div>
+
+    <div class="block">
+      <h3>결과 &#183; GPR word 1041 의 16 lane</h3>
+      <div class="lanes"><div class="lane"><span class="ln">0</span><b>16</b><em>0x4180</em></div><div class="lane"><span class="ln">1</span><b>32</b><em>0x4200</em></div><div class="lane"><span class="ln">2</span><b>48</b><em>0x4240</em></div><div class="lane"><span class="ln">3</span><b>64</b><em>0x4280</em></div><div class="lane"><span class="ln">4</span><b>80</b><em>0x42a0</em></div><div class="lane"><span class="ln">5</span><b>96</b><em>0x42c0</em></div><div class="lane"><span class="ln">6</span><b>112</b><em>0x42e0</em></div><div class="lane"><span class="ln">7</span><b>128</b><em>0x4300</em></div><div class="lane"><span class="ln">8</span><b>144</b><em>0x4310</em></div><div class="lane"><span class="ln">9</span><b>160</b><em>0x4320</em></div><div class="lane"><span class="ln">10</span><b>176</b><em>0x4330</em></div><div class="lane"><span class="ln">11</span><b>192</b><em>0x4340</em></div><div class="lane"><span class="ln">12</span><b>208</b><em>0x4350</em></div><div class="lane"><span class="ln">13</span><b>224</b><em>0x4360</em></div><div class="lane"><span class="ln">14</span><b>240</b><em>0x4370</em></div><div class="lane"><span class="ln">15</span><b>256</b><em>0x4380</em></div></div>
+    </div>
+  </div>
+
+  <!-- ================= L = 32 ================= -->
+  <div class="panel">
+    <header>
+      <h2>L = 32</h2>
+      <div class="shape">y(16) = A(16 &#215; 512) &#183; v(512)</div>
+    </header>
+
+    <div class="block">
+      <h3>뱅크별 DRAM row 100 &#183; 64 beat 중</h3>
+      <div class="brow"><span class="bk">bk00</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">512<em>0x4400</em></span></div>
+<div class="brow"><span class="bk">bk01</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">1,024<em>0x4480</em></span></div>
+<div class="brow"><span class="bk">bk02</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">1,536<em>0x44c0</em></span></div>
+<div class="brow"><span class="bk">bk03</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">2,048<em>0x4500</em></span></div>
+<div class="brow"><span class="bk">bk04</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">2,560<em>0x4520</em></span></div>
+<div class="brow"><span class="bk">bk05</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">3,072<em>0x4540</em></span></div>
+<div class="brow"><span class="bk">bk06</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">3,584<em>0x4560</em></span></div>
+<div class="brow"><span class="bk">bk07</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">4,096<em>0x4580</em></span></div>
+<div class="brow"><span class="bk">bk08</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">4,608<em>0x4590</em></span></div>
+<div class="brow"><span class="bk">bk09</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">5,120<em>0x45a0</em></span></div>
+<div class="brow"><span class="bk">bk10</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">5,632<em>0x45b0</em></span></div>
+<div class="brow"><span class="bk">bk11</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">6,144<em>0x45c0</em></span></div>
+<div class="brow"><span class="bk">bk12</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">6,656<em>0x45d0</em></span></div>
+<div class="brow"><span class="bk">bk13</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">7,168<em>0x45e0</em></span></div>
+<div class="brow"><span class="bk">bk14</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">7,680<em>0x45f0</em></span></div>
+<div class="brow"><span class="bk">bk15</span><div class="track"><i class="fill" style="--beats:32"></i></div><span class="yv">8,192<em>0x4600</em></span></div>
+      <div class="axisrow">
+        <div class="axis"><span>beat 0</span><span>31</span><span>63</span></div>
+        <div class="caplbl">y[b] / BF16</div>
+      </div>
+      <div class="legend">
+        <span><i class="sw-a"></i>읽히는 beat &#183; 32 / 64</span>
+        <span><i class="sw-e"></i>손대지 않음 &#183; 32 / 64</span>
+      </div>
+    </div>
+
+    <div class="block">
+      <h3>Global Buffer &#183; 64 beat 용량</h3>
+      <div class="stripwrap">
+        <span class="bk">GB</span>
+        <div class="track gb"><i class="fill gbfill" style="--beats:32"></i></div>
+        <span class="note">32 / 64</span>
+      </div>
+      <h3 style="margin-top:14px">GPR &#183; WRVEC 가 읽어갈 벡터</h3>
+      <div class="stripwrap">
+        <span class="bk">GPR</span>
+        <div class="track gpr"><i class="fill gprfill" style="--beats:32"></i></div>
+        <span class="note">word 0&#8211;31</span>
+      </div>
+    </div>
+
+    <div class="block">
+      <h3>결과 &#183; GPR word 1041 의 16 lane</h3>
+      <div class="lanes"><div class="lane"><span class="ln">0</span><b>512</b><em>0x4400</em></div><div class="lane"><span class="ln">1</span><b>1,024</b><em>0x4480</em></div><div class="lane"><span class="ln">2</span><b>1,536</b><em>0x44c0</em></div><div class="lane"><span class="ln">3</span><b>2,048</b><em>0x4500</em></div><div class="lane"><span class="ln">4</span><b>2,560</b><em>0x4520</em></div><div class="lane"><span class="ln">5</span><b>3,072</b><em>0x4540</em></div><div class="lane"><span class="ln">6</span><b>3,584</b><em>0x4560</em></div><div class="lane"><span class="ln">7</span><b>4,096</b><em>0x4580</em></div><div class="lane"><span class="ln">8</span><b>4,608</b><em>0x4590</em></div><div class="lane"><span class="ln">9</span><b>5,120</b><em>0x45a0</em></div><div class="lane"><span class="ln">10</span><b>5,632</b><em>0x45b0</em></div><div class="lane"><span class="ln">11</span><b>6,144</b><em>0x45c0</em></div><div class="lane"><span class="ln">12</span><b>6,656</b><em>0x45d0</em></div><div class="lane"><span class="ln">13</span><b>7,168</b><em>0x45e0</em></div><div class="lane"><span class="ln">14</span><b>7,680</b><em>0x45f0</em></div><div class="lane"><span class="ln">15</span><b>8,192</b><em>0x4600</em></div></div>
+    </div>
+  </div>
+
+</div>
+
+<hr class="hr">
+
+<section>
+  <h2>무엇이 늘어나고 무엇이 그대로인가</h2>
+  <p>왼쪽 칸이 L 에 따라 움직이는 것, 오른쪽 칸이 L 과 무관한 것이다. GEMV 를 이 하드웨어로 키울 때
+  무엇을 바꿔야 하는지가 여기서 갈린다 &#8212; 출력을 늘리려면 L 이 아니라 <code>MAC</code>+<code>RD_MAC</code>
+  쌍을 row 를 바꿔가며 더 쏘아야 한다.</p>
+  <div class="tw">
+    <table>
+      <thead><tr><th>항목</th><th>L = 1</th><th>L = 32</th><th>관계</th></tr></thead>
+      <tbody>
+        <tr><td class="k">K (내적 길이)</td><td class="grow">16</td><td class="grow">512</td><td class="same">16L</td></tr>
+        <tr><td class="k">A 의 shape</td><td class="grow">16 &#215; 16</td><td class="grow">16 &#215; 512</td><td class="same">16 &#215; 16L</td></tr>
+        <tr><td class="k">뱅크당 읽는 바이트</td><td class="grow">32 B</td><td class="grow">1024 B</td><td class="same">32L</td></tr>
+        <tr><td class="k">row 64 beat 중 점유</td><td class="grow">1</td><td class="grow">32</td><td class="same">L</td></tr>
+        <tr><td class="k">GB 점유 (용량 64)</td><td class="grow">1</td><td class="grow">32</td><td class="same">L</td></tr>
+        <tr><td class="k">벡터 GPR 워드</td><td class="grow">1</td><td class="grow">32</td><td class="same">L</td></tr>
+        <tr><td class="k">MAC 마디 (fan-out)</td><td class="grow">1</td><td class="grow">32</td><td class="same">L</td></tr>
+        <tr><td class="k">곱셈-누산 횟수</td><td class="grow">256</td><td class="grow">8,192</td><td class="same">16 &#215; 16L</td></tr>
+        <tr><td class="k">쓴 weight 총량</td><td class="grow">512 B</td><td class="grow">16 KiB</td><td class="same">512L</td></tr>
+        <tr><td class="k">출력 y 길이</td><td class="same">16</td><td class="same">16</td><td class="same">뱅크 수 &#183; L 무관</td></tr>
+        <tr><td class="k">결과 GPR 워드</td><td class="same">1</td><td class="same">1</td><td class="same">L 무관</td></tr>
+        <tr><td class="k">ISR 워드 수</td><td class="same">4</td><td class="same">4</td><td class="same">L 무관</td></tr>
+        <tr><td class="k">doorbell</td><td class="same">1</td><td class="same">1</td><td class="same">L 무관</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>ISR 4 워드 &#8212; 실제로 다른 건 두 니블</h2>
+  <p>아래는 두 실행이 IMEM 에 실제로 내려보낸 워드다.
+  <code>RD_MAC</code> 과 <code>EOS</code> 는 <b class="tl">바이트 단위로 동일</b>하고,
+  <code>WRVEC</code> 와 <code>MAC</code> 도 <code>OPSIZE</code>(bit 58:49) 를 뺀 나머지가 전부 같다.
+  512 짜리 내적과 16 짜리 내적의 차이가 전부 그 10 비트에 들어 있다.</p>
+  <div class="tw">
+    <table>
+      <thead><tr><th>word</th><th>L</th><th>256 b ISR &#183; w[3] w[2] w[1] w[0]</th></tr></thead>
+      <tbody>
+        <tr><td class="k">0 WRVEC</td><td>1</td><td>00000000000000000000ffffffffffffffffffff00000000<span class="diff">7802</span>000008000000</td></tr>
+        <tr><td class="k">0 WRVEC</td><td>32</td><td>00000000000000000000ffffffffffffffffffff00000000<span class="diff">7840</span>000008000000</td></tr>
+        <tr><td class="k">1 MAC</td><td>1</td><td>0000000000000000ffffffffffffffffffffffff3fffc000<span class="diff">6002</span>000008001900</td></tr>
+        <tr><td class="k">1 MAC</td><td>32</td><td>0000000000000000ffffffffffffffffffffffff3fffc000<span class="diff">6040</span>000008001900</td></tr>
+        <tr><td class="k">2 RD_MAC</td><td>동일</td><td class="same">00000000000000000000ffffffffffffffffffff000000008000000008010440</td></tr>
+        <tr><td class="k">3 EOS</td><td>동일</td><td class="same">00000000000000000000ffffffffffffffffffff000000008800000008000000</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>주소는 어디에도 움직이지 않는다</h2>
+  <p>시작 주소는 <code>pim_bank(ch, b) + ROW &#215; 2048</code> 로 L 과 무관하다. L 은 그 지점에서
+  <em>몇 바이트를 읽느냐</em>만 바꾼다. 아래는 ch0, row 100 (offset <code>0x32000</code>) 기준
+  실제 AXI 주소다 &#8212; ch2 이미지의 뱅크 stride 는 1 GiB.</p>
+  <div class="tw">
+    <table>
+      <thead><tr><th></th><th>AXI 시작 주소</th><th>L=1 이 읽는 길이</th><th>L=32 가 읽는 길이</th></tr></thead>
+      <tbody>
+<tr><td>bank 0</td><td>0x04000032000</td><td>32 B</td><td>1024 B</td></tr>
+<tr><td>bank 1</td><td>0x04040032000</td><td>32 B</td><td>1024 B</td></tr>
+<tr><td>bank 2</td><td>0x04080032000</td><td>32 B</td><td>1024 B</td></tr>
+<tr class="ell"><td>&#8942;</td><td>&#8942;</td><td>&#8942;</td><td>&#8942;</td></tr>
+<tr><td>bank 15</td><td>0x043c0032000</td><td>32 B</td><td>1024 B</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>천장이 64 인 이유는 세 개가 같은 수라서다</h2>
+  <p><code>EMU_MAX_OPSIZE</code> 가 64 인 건 우연이 아니다. <b class="amb">DRAM row 한 줄이 2048 B = 64 beat</b>,
+  <b class="tl">GB 용량이 64 beat</b>, 그리고 <b class="amb">COL + OPSIZE &#8804; 64</b> 라는 제약이 전부 같은 64 다.
+  L=32 는 그 절반을 쓰고 있고, L=64 면 한 row 를 정확히 다 쓴다 &#8212; 위 다이어그램의 트랙이 64 칸으로
+  고정되어 있는 이유가 이것이다. 트랙이 꽉 차는 순간이 <code>K = 1024</code>, 이 datapath 에서
+  한 번의 MAC 으로 가능한 가장 긴 내적이다.</p>
+  <p>그 이상으로 K 를 늘리려면 MAC 을 여러 발로 쪼개고 누산기를 이어붙여야 한다.
+  누산 latch 는 <code>RD_MAC</code> 이 read-clear 하므로, 중간에 RD_MAC 을 넣지 않고
+  <code>MAC</code> 을 연달아 쏘면 부분합이 누적된다 &#8212; 다만 emu_gemv 는 그 형태를 쏘지 않으므로
+  이 문단은 ISR 가이드의 서술이고 이 보드에서 측정된 사실이 아니다.</p>
+</section>
+
+<section>
+  <h2>측정 &#8212; 실행 시간은 L 을 따라가지 않는다</h2>
+  <div class="tw">
+    <table>
+      <thead><tr><th></th><th>L = 1</th><th>L = 32</th></tr></thead>
+      <tbody>
+        <tr><td class="k">호스트 관측 시간</td><td>16 &#181;s</td><td>14 &#181;s</td></tr>
+        <tr><td class="k">STATUS poll</td><td>2</td><td>4</td></tr>
+        <tr><td class="k">결과 GPR read</td><td>1</td><td>1</td></tr>
+        <tr><td class="k">판정</td><td>16/16 lane ok</td><td>16/16 lane ok</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="margin-top:16px">연산량이 32 배인데 시간은 오히려 줄었다. 이 <code>&#181;s</code> 값은
+  커널 실행 시간이 아니라 <b class="amb">doorbell 부터 poison 이 사라진 GPR read 까지의 호스트 벽시계</b>이고,
+  그 구간은 MMIO 왕복과 C2H DMA 지연이 지배한다. 두 값의 차이는 신호가 아니라 잡음이다 &#8212;
+  L 에 따른 실제 커널 시간을 보려면 ILA 로 MC 쪽을 잡아야 한다.</p>
+</section>
+
+<section>
+  <h2>재현</h2>
+  <div class="tw">
+    <table>
+      <tbody>
+        <tr><td class="k">L = 1</td><td>./emu_gemv --ch 0 --l 1 --fill wrvec</td></tr>
+        <tr><td class="k">L = 32</td><td>./emu_gemv --ch 0 --l 32 --fill wrvec</td></tr>
+        <tr><td class="k">순서 추적</td><td>gdb -q -x emu_gemv.gdb -ex trace_on -ex run --args ./emu_gemv.dbg --ch 0 --l 32</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</div>

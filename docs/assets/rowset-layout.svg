@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" width="900" height="620" font-family="ui-sans-serif,system-ui,'Helvetica Neue',Arial,sans-serif">
+  <style>
+    .bg    { fill: #fbfbfd; }
+    .ttl   { font-size: 17px; font-weight: 700; fill: #14161a; }
+    .sub   { font-size: 12px; fill: #5b6470; }
+    .lbl   { font-size: 11px; fill: #2a2f37; }
+    .lblb  { font-size: 11px; font-weight: 700; fill: #14161a; }
+    .mono  { font-size: 10.5px; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; fill: #2a2f37; }
+    .monob { font-size: 10.5px; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; font-weight: 700; fill: #14161a; }
+    .bank  { fill: #ffffff; stroke: #c8ced8; stroke-width: 1; }
+    .row0  { fill: #dbe7fb; stroke: #7ba3e0; stroke-width: 1; }
+    .row1  { fill: #c9defa; stroke: #7ba3e0; stroke-width: 1; }
+    .rowo  { fill: #fde4d0; stroke: #e39a5c; stroke-width: 1; }
+    .pad   { fill: #eceff4; stroke: #c8ced8; stroke-width: 1; stroke-dasharray: 3 2; }
+    .gb    { fill: #e2f3e4; stroke: #63ac6f; stroke-width: 1.2; }
+    .gpr   { fill: #f6e6f6; stroke: #b078b0; stroke-width: 1.2; }
+    .ln    { stroke: #6b7480; stroke-width: 1.4; fill: none; }
+    .lnb   { stroke: #2f6fd0; stroke-width: 1.8; fill: none; }
+    .brk   { stroke: #c8ced8; stroke-width: 1; stroke-dasharray: 4 3; }
+  </style>
+  <rect class="bg" x="0" y="0" width="900" height="620"/>
+
+  <text class="ttl" x="24" y="30">rowset — the unit pim_alloc hands out</text>
+  <text class="sub" x="24" y="50">One row index, claimed in all 16 banks at once. 2048 B x 16 = 32 KiB. There are 131072 of them (17-bit ROW).</text>
+  <text class="sub" x="24" y="67">A MAC reads the SAME (ROW, COL) in every bank of pu_mask, so a weight tile is only addressable if it is replicated this way.</text>
+
+  <!-- ============ left: the 16 banks ============ -->
+  <text class="lblb" x="24" y="100">HBM direct aperture &#8212; 0x40_0000_0000 + bank x 1 GiB</text>
+
+  <!-- column headers -->
+  <text class="mono" x="150" y="120">row r</text>
+  <text class="mono" x="222" y="120">r+1</text>
+  <text class="mono" x="294" y="120">r+2</text>
+  <text class="mono" x="366" y="120">r+3</text>
+  <text class="mono" x="438" y="120">...</text>
+
+  <!-- bank rows -->
+  <g>
+    <!-- bank 0 -->
+    <rect class="bank" x="100" y="128" width="40" height="26"/>
+    <text class="mono" x="106" y="145">bank 0</text>
+    <rect class="row0" x="144" y="128" width="68" height="26"/><text class="mono" x="152" y="145">y[0] k0</text>
+    <rect class="row1" x="216" y="128" width="68" height="26"/><text class="mono" x="224" y="145">y[0] k1</text>
+    <rect class="row0" x="288" y="128" width="68" height="26"/><text class="mono" x="296" y="145">y[16] k0</text>
+    <rect class="row1" x="360" y="128" width="68" height="26"/><text class="mono" x="368" y="145">y[16] k1</text>
+    <rect class="pad"  x="432" y="128" width="40" height="26"/>
+
+    <!-- bank 1 -->
+    <rect class="bank" x="100" y="158" width="40" height="26"/>
+    <text class="mono" x="106" y="175">bank 1</text>
+    <rect class="row0" x="144" y="158" width="68" height="26"/><text class="mono" x="152" y="175">y[1] k0</text>
+    <rect class="row1" x="216" y="158" width="68" height="26"/><text class="mono" x="224" y="175">y[1] k1</text>
+    <rect class="row0" x="288" y="158" width="68" height="26"/><text class="mono" x="296" y="175">y[17] k0</text>
+    <rect class="row1" x="360" y="158" width="68" height="26"/><text class="mono" x="368" y="175">y[17] k1</text>
+    <rect class="pad"  x="432" y="158" width="40" height="26"/>
+
+    <!-- ellipsis -->
+    <text class="mono" x="112" y="203">   :</text>
+    <text class="mono" x="172" y="203">:</text>
+    <text class="mono" x="244" y="203">:</text>
+    <text class="mono" x="316" y="203">:</text>
+    <text class="mono" x="388" y="203">:</text>
+
+    <!-- bank 15 -->
+    <rect class="bank" x="100" y="212" width="40" height="26"/>
+    <text class="mono" x="102" y="229">bank 15</text>
+    <rect class="row0" x="144" y="212" width="68" height="26"/><text class="mono" x="150" y="229">y[15] k0</text>
+    <rect class="row1" x="216" y="212" width="68" height="26"/><text class="mono" x="222" y="229">y[15] k1</text>
+    <rect class="row0" x="288" y="212" width="68" height="26"/><text class="mono" x="294" y="229">y[31] k0</text>
+    <rect class="row1" x="360" y="212" width="68" height="26"/><text class="mono" x="366" y="229">y[31] k1</text>
+    <rect class="pad"  x="432" y="212" width="40" height="26"/>
+  </g>
+
+  <!-- group brackets -->
+  <path class="ln" d="M144 248 L144 256 L284 256 L284 248"/>
+  <text class="lbl" x="176" y="272">group 0</text>
+  <path class="ln" d="M288 248 L288 256 L428 256 L428 248"/>
+  <text class="lbl" x="322" y="272">group 1</text>
+  <text class="sub" x="144" y="290">group g holds outputs y[16g .. 16g+15], one per bank &#8212; which is exactly what RD_MAC returns</text>
+
+  <!-- one rowset callout -->
+  <path class="lnb" d="M144 122 L144 114 L212 114 L212 122"/>
+  <text class="lblb" x="146" y="108">one rowset = ROW r in all 16 banks</text>
+
+  <!-- ============ right: inside one row ============ -->
+  <line class="brk" x1="500" y1="90" x2="500" y2="300"/>
+  <text class="lblb" x="524" y="100">inside one row: 2048 B = 64 beats = 1024 BF16</text>
+
+  <rect class="row0" x="524" y="118" width="330" height="30"/>
+  <text class="mono" x="534" y="137">beat 0</text>
+  <text class="mono" x="600" y="137">1</text>
+  <text class="mono" x="650" y="137">2</text>
+  <text class="mono" x="700" y="137">...</text>
+  <text class="mono" x="800" y="137">beat 63</text>
+  <text class="sub" x="524" y="166">COL selects the start beat, OPSIZE the count. COL + OPSIZE &#8804; 64:</text>
+  <text class="sub" x="524" y="182">a MAC can never cross a row boundary, so one chunk of K is one row.</text>
+
+  <text class="lblb" x="524" y="212">K &gt; 1024 &#8594; C = ceil(K/1024) chunks &#8594; C rows per output group</text>
+  <text class="mono" x="524" y="234">ROW(g, c) = base + g*C + c        COL = 0 always (row-aligned)</text>
+  <text class="sub" x="524" y="256">Row-aligned wastes at most 1023 elements per output row and buys</text>
+  <text class="sub" x="524" y="272">COL = 0 for free &#8212; the allocator never has to track a column.</text>
+
+  <!-- ============ bottom: the kernel ============ -->
+  <line class="brk" x1="24" y1="316" x2="876" y2="316"/>
+  <text class="lblb" x="24" y="340">the kernel &#8212; chunk-outer, one doorbell for the whole GEMV</text>
+  <text class="sub" x="24" y="358">[measured 2026-08-10] 12.29 GMAC/s sustained, and 1.62x faster than putting the group loop outside.</text>
+
+  <!-- GPR -->
+  <rect class="gpr" x="40" y="382" width="118" height="42"/>
+  <text class="lblb" x="58" y="400">GPR</text>
+  <text class="mono" x="50" y="416">x chunk c, 64 words</text>
+
+  <!-- WRVEC arrow -->
+  <path class="lnb" d="M158 403 L206 403" marker-end="url(#ar)"/>
+  <text class="monob" x="160" y="396">WRVEC</text>
+
+  <!-- GB -->
+  <rect class="gb" x="208" y="382" width="112" height="42"/>
+  <text class="lblb" x="238" y="400">Global Buffer</text>
+  <text class="mono" x="230" y="416">64 beats max</text>
+
+  <!-- fan-out to banks -->
+  <path class="lnb" d="M320 403 L352 403"/>
+  <path class="lnb" d="M352 403 L352 452 L392 452" marker-end="url(#ar)"/>
+  <path class="lnb" d="M352 403 L352 382 L392 382" marker-end="url(#ar)"/>
+  <path class="lnb" d="M352 403 L392 403" marker-end="url(#ar)"/>
+  <text class="sub" x="326" y="374">rewinds at</text>
+  <text class="sub" x="326" y="443">every MAC</text>
+
+  <rect class="rowo" x="394" y="368" width="120" height="28"/>
+  <text class="mono" x="404" y="386">MAC g=0  ROW b+0</text>
+  <rect class="rowo" x="394" y="400" width="120" height="28"/>
+  <text class="mono" x="404" y="418">MAC g=1  ROW b+C</text>
+  <rect class="rowo" x="394" y="432" width="120" height="28"/>
+  <text class="mono" x="404" y="450">MAC g=2  ROW b+2C</text>
+  <text class="mono" x="440" y="474">...</text>
+
+  <!-- RD_MAC -->
+  <path class="lnb" d="M514 382 L546 382 L546 414 L570 414" marker-end="url(#ar)"/>
+  <path class="lnb" d="M514 414 L570 414"/>
+  <path class="lnb" d="M514 446 L546 446 L546 414"/>
+  <text class="monob" x="520" y="406">RD_MAC</text>
+
+  <rect class="gpr" x="572" y="382" width="150" height="64"/>
+  <text class="lblb" x="600" y="400">GPR result run</text>
+  <text class="mono" x="582" y="416">word d+c*G+g</text>
+  <text class="mono" x="582" y="432">16 BF16 lanes = 16 outputs</text>
+
+  <path class="lnb" d="M722 414 L768 414" marker-end="url(#ar)"/>
+  <text class="mono" x="726" y="406">one pread</text>
+  <rect class="bank" x="770" y="392" width="96" height="44"/>
+  <text class="lblb" x="794" y="410">host</text>
+  <text class="mono" x="776" y="428">sums C partials</text>
+
+  <text class="sub" x="24" y="502">for c in 0..C:  WRVEC(x chunk c)      &#8212; C vector loads for the WHOLE gemv, not G x C, because the GB rewinds per MAC</text>
+  <text class="sub" x="24" y="520">    for g in 0..G:  MAC(ROW=base+g*C+c, pu_mask=gb_mc_mask=0xFFFF);  RD_MAC(word=d+c*G+g)</text>
+  <text class="sub" x="24" y="538">EOS</text>
+
+  <text class="sub" x="24" y="566">Every MAC under one WRVEC must carry the SAME OPSIZE: the per-bank skid below the GB has no flush port, so a</text>
+  <text class="sub" x="24" y="582">mismatch leaves beats behind and the next MAC silently starts its vector at the wrong element.</text>
+  <text class="sub" x="24" y="604">Cost model, measured: T(us) = 14 + 1.37*C + 1.362*G*C at OPSIZE 64 &#8212; within 2.5% over G = 16..2000.</text>
+
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f6fd0"/>
+    </marker>
+  </defs>
+</svg>

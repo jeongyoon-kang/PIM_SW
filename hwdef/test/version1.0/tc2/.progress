@@ -1,0 +1,24 @@
+    0.0s  start
+   18.0s    arm: axis_ila_0 = WAITING FOR TRIGGER
+   18.0s    arm: axis_ila_1 = WAITING FOR TRIGGER
+   18.0s    arm: axis_ila_2 = WAITING FOR TRIGGER
+   18.0s    arm: axis_ila_3 = WAITING FOR TRIGGER
+   18.0s    arm: axis_ila_4 = WAITING FOR TRIGGER
+   18.0s  armed
+   19.0s  workload done
+   19.0s  mc_read_axis_ila_0 upload 시작
+   32.7s  mc_read_axis_ila_0 upload 끝
+   52.8s  mc_read_axis_ila_0 written
+   52.8s  mc_read_axis_ila_1 upload 시작
+   76.1s  mc_read_axis_ila_1 upload 끝
+  107.4s  mc_read_axis_ila_1 written
+  107.4s  mc_read_axis_ila_2 upload 시작
+  130.7s  mc_read_axis_ila_2 upload 끝
+  161.8s  mc_read_axis_ila_2 written
+  161.8s  mc_read_axis_ila_3 upload 시작
+  165.9s  mc_read_axis_ila_3 upload 끝
+  177.1s  mc_read_axis_ila_3 written
+  177.1s  mc_read_axis_ila_4 upload 시작
+  181.1s  mc_read_axis_ila_4 upload 끝
+  192.3s  mc_read_axis_ila_4 written
+  192.6s  DONE

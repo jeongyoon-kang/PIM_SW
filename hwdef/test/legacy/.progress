@@ -1,0 +1,9 @@
+    0.0s  start
+   10.7s    arm: axis_ila_0 = WAITING FOR TRIGGER
+   10.7s  armed
+   10.7s  workload 비정상 종료: child process exited abnormally
+   11.7s  workload done
+   11.7s  mc_read_axis_ila_0 upload 시작
+   30.6s  mc_read_axis_ila_0 upload 끝
+   55.1s  mc_read_axis_ila_0 written
+   55.3s  DONE
