@@ -90,11 +90,22 @@ const char *pim_gemv_verify(pim_ctx *c, const pim_tensor *w, const uint16_t *W,
 /* THE VECTOR HAS A LAYOUT CONTRACT TOO, and it is sharper than the matrix's.
  *
  * A WRVEC reads whole 16-lane beats, and there is no lane mask anywhere on the MAC
- * path.  So the elements from k to nredpad are not "unused" — they are multiplied,
- * they join their beat's exponent maximum, and a stale one can annihilate every
- * real lane beside it or, if its bytes decode as Inf or NaN, poison the result.
- * ZEROING THEM IS NOT AN OPTIMISATION, IT IS THE CONTRACT (pim_mac_exact.c,
- * precondition 1).
+ * path.  So the elements from k to nredpad are not "unused" — they are multiplied.
+ *
+ * WHAT THAT COSTS IS NARROWER THAN IT SOUNDS, and worth knowing precisely.  The
+ * block float takes its exponent maximum over the PRODUCTS, and a product with a
+ * zero operand emits exp=0 (bf16_mul.sv:182-184), so a stale vector lane facing the
+ * weight tensor's zeroed padding contributes nothing at all.  Measured on the ch2
+ * image: a tail of 1.5e18, or of the largest finite BF16, changed 0 of 32 outputs.
+ *
+ * THE EXCEPTION IS THE IEEE SPECIAL, and it is the one that happens.  0 * Inf is
+ * NaN, and one NaN poisons its bank's entire accumulation — +Inf and NaN each
+ * turned 32 of 32 outputs into NaN.  An uninitialised GPR word decodes as one of
+ * those whenever a lane's exponent field is all ones, about 0.8% of bit patterns.
+ *
+ * ZEROING IS THEREFORE STILL THE CONTRACT (pim_mac_exact.c, precondition 1) — not
+ * because a large lane would drown the real ones, but because an uninitialised one
+ * will eventually be Inf, and once is enough.
  *
  * pim_gemv_upload_x() pads and stamps; pim_gemv_xtag() is what the WRVECs assume.
  * A GPR buffer filled by a plain pim_memcpy is refused at lowering, because there

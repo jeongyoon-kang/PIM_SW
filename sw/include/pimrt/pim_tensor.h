@@ -67,10 +67,29 @@
  * host.  For RED_MAJOR it is not harmless at all — the frontier lands wherever the
  * sequence happens to be.
  *
- * It is tempting to think a zeroed vector opposite those lanes is enough.  It is
- * not: the datapath is a block float, so one garbage lane with a large exponent
- * sets the exponent for its whole beat and shifts the real values beside it into
- * nothing, and a NaN would pass through a zero multiplier unharmed.
+ * IS A ZEROED VECTOR OPPOSITE THOSE LANES ENOUGH?  Not quite, and the reason is
+ * narrower than it looks.
+ *
+ * MEASURED 2026-09-17, runtime/test/tensor_board on the ch2 image.  The tail was
+ * filled with six values and the same MAC run against a golden from pim_mac_exact:
+ *
+ *     1.5e18                                 0 of 32 outputs differ
+ *     3.4e38, the largest finite BF16        0 of 32
+ *     +Inf                                  32 of 32, every output NaN
+ *     -Inf                                  32 of 32, every output NaN
+ *     NaN                                   32 of 32, every output NaN
+ *     0xA5A5, what an unwritten page reads   0 of 32
+ *
+ * SO THE MECHANISM IS NOT THE BLOCK EXPONENT.  A lane that is merely enormous —
+ * right up to the largest finite BF16 — is neutralised by the zero beside it, which
+ * says the exponent is taken after the multiply and not before.  What survives a
+ * zero multiplier is the IEEE special: 0 * Inf is NaN, and one NaN poisons its
+ * bank's entire accumulation.
+ *
+ * THE INVARIANT STANDS, for that reason instead.  Uninitialised DRAM decodes as
+ * Inf or NaN whenever a lane's exponent field happens to be all ones — 512 of the
+ * 65536 bit patterns, so about 0.8% of lanes.  Fifteen tail lanes across a
+ * thousand banks means it is not a corner case, it is a certainty.
  *
  * So a RED_MAJOR tensor carries an invariant:
  *

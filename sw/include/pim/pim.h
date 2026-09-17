@@ -144,9 +144,15 @@ const pim_geometry *pim_geom(void);
  *
  * The case it exists for is a KV cache's V tensor.  Its reduction axis is the
  * sequence, so the final beat of any launch straddles the write frontier and a MAC
- * reads past it.  Zero there is not merely tidy: these lanes take part in a block
- * float, where one garbage lane with a large exponent shifts the real values of the
- * same beat into nothing, and a NaN would propagate through a zeroed multiplier. */
+ * reads past it, multiplied by a vector lane the host zeroed.
+ *
+ * A ZERO MULTIPLIER IS NOT ENOUGH, and the reason is narrower than it looks.
+ * Measured on the ch2 image (runtime/test/tensor_board): a tail lane of 1.5e18, or
+ * even the largest finite BF16, changes NO output — the zero beside it wins.  But
+ * +Inf, -Inf and NaN each turn EVERY output of their bank into NaN, because 0 * Inf
+ * is NaN and one NaN poisons the accumulation it joins.  Uninitialised DRAM decodes
+ * as one of those whenever a lane's exponent field is all ones, which is about 0.8%
+ * of bit patterns — a certainty across a KV cache, not a corner case. */
 #define PIM_ALLOC_F_ZERO    0x1u
 
 /* RESERVED, AND REFUSED TODAY.  It would mean "granules at consecutive PIM

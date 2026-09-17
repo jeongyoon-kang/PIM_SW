@@ -22,7 +22,7 @@ LDFLAGS ?= -L.. -L../../lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../
 LDLIBS  ?= -lpimrt -lpim
 
 .PHONY: all run clean
-all: gemv_test tlatch_test col_probe eager_board xfer_bench
+all: gemv_test tlatch_test col_probe eager_board tensor_board xfer_bench
 
 %_test: %_test.c ../libpimrt.so ../../lib/libpim.so \
         ../../include/pimrt/pim_gemv.h ../../include/pimrt/pim_exec.h
@@ -40,6 +40,13 @@ all: gemv_test tlatch_test col_probe eager_board xfer_bench
 col_probe: col_probe.c
 	$(CC) $(CFLAGS) -I../../../hwdef -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# tensor_board hand-assembles its ISRs the way col_probe does, so it needs hwdef for
+# the encoder.  It is the board half of lib/test/tensor_test: that one proves
+# placement against a simulated card, this one asks the real datapath the question
+# no simulation can answer.
+tensor_board: tensor_board.c
+	$(CC) $(CFLAGS) -I../../../hwdef -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 eager_board: eager_board.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -54,4 +61,4 @@ run: all
 	./tlatch_test
 
 clean:
-	rm -f gemv_test tlatch_test col_probe eager_board xfer_bench
+	rm -f gemv_test tlatch_test col_probe eager_board tensor_board xfer_bench

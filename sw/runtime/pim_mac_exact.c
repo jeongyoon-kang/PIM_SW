@@ -38,11 +38,25 @@
 //  1. BOTH operand buffers must be ZERO in lanes k..15 of the final beat.  There is
 //     no lane mask anywhere on the MAC path (mac_top.sv:152-171 instantiates all 16
 //     multipliers unconditionally; bank_controller_top.v:677-678 feeds two whole
-//     256-bit words).  A stale lane is not ignored: it joins the exponent max and
-//     can annihilate every real lane in its beat, and if its bytes happen to decode
-//     as Inf or NaN it poisons the whole result.  Zeroing only ONE side is not
-//     enough.  pim_weight_upload memsets its staging block and pim_gemv's vector
-//     staging memsets before copying, so both sides are covered here.
+//     256-bit words).  A stale lane is not ignored.
+//
+//     BUT ZEROING ONE SIDE GOES FURTHER THAN THIS NOTE USED TO CLAIM, and the
+//     reason is three lines below at bf16_mul.sv:182-184: the exponent max is taken
+//     over the PRODUCTS, and a product with a zero operand emits exp=0, man=0.  So
+//     a stale lane facing a zeroed one cannot annihilate anything — it contributes
+//     exactly nothing.  [MEASURED 2026-09-17, runtime/test/tensor_board: a tail of
+//     1.5e18, and of the largest finite BF16, changed 0 of 32 outputs, on EITHER
+//     side of the multiply.]
+//
+//     WHAT DOES GET THROUGH IS THE IEEE SPECIAL.  0 * Inf is NaN, and one NaN
+//     poisons its bank's whole accumulation: +Inf, -Inf and NaN each turned 32 of
+//     32 outputs into NaN in the same measurement, again on either side.  So
+//     zeroing one side is enough for garbage that is merely large and is NOT enough
+//     for garbage that is uninitialised — which is the case that matters, since an
+//     unwritten lane's exponent field is all ones about 0.8% of the time.
+//
+//     pim_weight_upload memsets its staging block and pim_gemv's vector staging
+//     memsets before copying, so both sides are covered here regardless.
 //
 //  2. The accumulator latch must be EMPTY on entry.  Hardware clears it only on
 //     reset and on a completed RD_MAC register handshake (acc_top.sv:161, 575-583).
