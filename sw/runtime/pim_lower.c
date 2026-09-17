@@ -24,7 +24,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 #define _GNU_SOURCE
 
-#include "pim/pim_logical.h"
+#include "pimrt/pim_logical.h"
 #include "pim/pim_addr.h"
 
 #include <stdio.h>

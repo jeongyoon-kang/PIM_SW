@@ -25,7 +25,7 @@ LDLIBS  ?= -lpimrt -lpim
 all: gemv_test tlatch_test col_probe eager_board xfer_bench
 
 %_test: %_test.c ../libpimrt.so ../../lib/libpim.so \
-        ../../include/pim/pim_gemv.h ../../include/pim/pim_exec.h
+        ../../include/pimrt/pim_gemv.h ../../include/pimrt/pim_exec.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
 ../libpimrt.so:

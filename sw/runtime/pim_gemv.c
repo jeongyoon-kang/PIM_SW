@@ -30,7 +30,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 #define _GNU_SOURCE
 
-#include "pim/pim_gemv.h"
+#include "pimrt/pim_gemv.h"
 #include "pim/pim_addr.h"
 
 #include <stdbool.h>

@@ -48,7 +48,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "pim.h"
+#include "pim/pim.h"
 
 #ifdef __cplusplus
 extern "C" {

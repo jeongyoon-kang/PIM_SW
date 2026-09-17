@@ -25,7 +25,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 #include "fake_drv.h"
 
-#include "pim/pim_gemv.h"
+#include "pimrt/pim_gemv.h"
 
 static int fail;
 #define CHECK(cond, ...) do{ if(!(cond)){ printf("  FAIL: "); printf(__VA_ARGS__); \

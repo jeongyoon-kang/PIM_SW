@@ -84,3 +84,14 @@ xsim.dir/
 .vscode/
 .idea/
 compile_commands.json
+
+# --------------------------------------------------------- machine state -----
+# Which platform this particular machine has selected, and the stamp that says
+# it was built.  Both are set by platform/select.sh and scripts/setup.sh; the
+# .conf files beside them are the source.  `active` is additionally a symlink
+# owned by root here, which git would fight over on every checkout.
+platform/active
+platform/.built
+
+# Vivado's working directory when scripts/reprogram.sh runs.
+scripts/logs/

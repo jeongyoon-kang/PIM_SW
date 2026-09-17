@@ -4,7 +4,16 @@
 #     make            # libpim.a, libpim.so
 #     make clean
 #
-# DEPENDS ON ../include AND NOTHING ELSE.
+# DEPENDS ON ../include/pim AND NOTHING ELSE.
+#
+# The headers are split by layer so that the dependency direction is visible in
+# every #include line rather than only in this comment:
+#
+#     include/pim/    libpim    pim.h  pim_geometry.h  pim_addr.h
+#     include/pimrt/  libpimrt  pim_exec.h  pim_logical.h  pim_gemv.h
+#
+# A `#include "pimrt/..."` appearing in a file under lib/ IS the violation; there
+# is no need to reason about which layer a name belongs to.
 #
 # In particular it does NOT depend on ../../hwdef.  That is the whole point of this
 # rewrite: hwdef compiles the topology in with -D, so a channel-count change means

@@ -31,8 +31,8 @@
 
 #include "pim/pim.h"
 #include "pim/pim_addr.h"
-#include "pim/pim_exec.h"
-#include "pim/pim_gemv.h"
+#include "pimrt/pim_exec.h"
+#include "pimrt/pim_gemv.h"
 
 static uint16_t f2b(float f) { uint32_t u; memcpy(&u, &f, 4); return (uint16_t)(u >> 16); }
 static float    b2f(uint16_t h){ uint32_t u = (uint32_t)h << 16; float f; memcpy(&f, &u, 4); return f; }

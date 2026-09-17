@@ -45,8 +45,8 @@
 
 #include "pim/pim.h"
 #include "pim/pim_addr.h"
-#include "pim/pim_exec.h"
-#include "pim/pim_gemv.h"
+#include "pimrt/pim_exec.h"
+#include "pimrt/pim_gemv.h"
 
 #include "emu_regs.h"
 

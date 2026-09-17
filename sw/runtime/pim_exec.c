@@ -19,7 +19,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 #define _GNU_SOURCE
 
-#include "pim/pim_exec.h"
+#include "pimrt/pim_exec.h"
 
 #include <errno.h>
 #include <fcntl.h>

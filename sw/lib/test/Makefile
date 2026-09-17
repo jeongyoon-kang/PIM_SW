@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: MIT
-# Tests for libpim that need NEITHER a board NOR a loaded pim.ko.
+# Tests that need NEITHER a board NOR a loaded pim.ko.
+#
+# NOT "tests for libpim", despite the directory.  The axis that decides where a
+# test lives is CAN I RUN IT RIGHT NOW, not which .so it exercises: lower_test and
+# eager_test link ../../runtime and include "pimrt/...", and they belong here
+# because they run against fake_drv.h's simulated pool.  ../../runtime/test is the
+# other half — same layers, but those need the card.
 #
 #     make run
 #

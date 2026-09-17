@@ -46,8 +46,8 @@
 #include <string.h>
 
 #include <pim/pim.h>
-#include <pim/pim_exec.h>
-#include <pim/pim_gemv.h>
+#include <pimrt/pim_exec.h>
+#include <pimrt/pim_gemv.h>
 #include <pim/pim_addr.h>
 
 static int fail;

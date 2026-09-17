@@ -4,6 +4,10 @@
 #     make            # libpimrt.a, libpimrt.so
 #     make clean
 #
+# ITS HEADERS LIVE IN ../include/pimrt; libpim's live in ../include/pim.  Both are
+# on the include path, and the direction is one-way: this layer includes "pim/..."
+# freely, and nothing under ../lib may include "pimrt/...".
+#
 # LINKS libpim, NOT its objects.  A runtime that reached into the library's internals
 # would make the library's public surface a fiction; here it can only call what an
 # application could call, which is what keeps pim.h honest.
@@ -27,7 +31,7 @@ LDLIBS  ?= -lpim
 
 SRC := pim_exec.c pim_lower.c pim_gemv.c pim_mac_exact.c
 OBJ := $(SRC:.c=.o)
-HDR := ../include/pim/pim_addr.h ../include/pim/pim_logical.h ../include/pim/pim_exec.h ../include/pim/pim_gemv.h \
+HDR := ../include/pim/pim_addr.h ../include/pimrt/pim_logical.h ../include/pimrt/pim_exec.h ../include/pimrt/pim_gemv.h \
        ../include/pim/pim.h ../include/pim/pim_geometry.h ../../hwdef/emu_regs.h
 
 .DEFAULT_GOAL := all

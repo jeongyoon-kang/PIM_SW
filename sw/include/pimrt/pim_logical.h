@@ -36,8 +36,8 @@
 
 #include <stdint.h>
 
-#include "pim.h"
-#include "pim_exec.h"
+#include "pim/pim.h"
+#include "pimrt/pim_exec.h"
 
 #ifdef __cplusplus
 extern "C" {

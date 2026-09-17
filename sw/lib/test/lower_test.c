@@ -24,8 +24,8 @@
 //////////////////////////////////////////////////////////////////////////////////
 #include "fake_drv.h"
 
-#include "pim/pim_gemv.h"
-#include "pim/pim_logical.h"
+#include "pimrt/pim_gemv.h"
+#include "pimrt/pim_logical.h"
 #include "pim/pim_addr.h"
 
 #include "emu_regs.h"
