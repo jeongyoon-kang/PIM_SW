@@ -95,3 +95,8 @@ platform/.built
 
 # Vivado's working directory when scripts/reprogram.sh runs.
 scripts/logs/
+
+# ----------------------------------------------------------------- python ----
+__pycache__/
+*.py[cod]
+.venv/
