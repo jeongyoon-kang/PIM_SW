@@ -28,7 +28,7 @@ HWDEF   := ../../../hwdef
 LIB     := ../pim_alloc.c ../pim_geom.c ../pim_addr.c
 
 .PHONY: all run clean
-all: geom_test pool_test lower_test eager_test
+all: geom_test pool_test lower_test eager_test tensor_test
 
 # hwdef is compiled with whatever platform/active says; go through
 # scripts/setup.sh if you want a different one compared.
@@ -53,6 +53,13 @@ eager_test: eager_test.c $(LIB) ../../runtime/pim_gemv.c \
             ../../runtime/pim_lower.c ../../runtime/pim_exec.c ../../runtime/pim_mac_exact.c
 	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ $(LDLIBS)
 
+# tensor_test compares pim_tensor's addressing against pim_gemv's before the two are
+# merged, so it links both.  It reads the card back through fake_drv.h rather than
+# recomputing addresses with the function under test.
+tensor_test: tensor_test.c $(LIB) ../../runtime/pim_tensor.c ../../runtime/pim_gemv.c \
+             ../../runtime/pim_lower.c ../../runtime/pim_exec.c ../../runtime/pim_mac_exact.c
+	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ $(LDLIBS)
+
 run: all
 	./geom_test
 	@echo
@@ -61,6 +68,8 @@ run: all
 	./lower_test
 	@echo
 	./eager_test
+	@echo
+	./tensor_test
 
 clean:
-	rm -f geom_test pool_test lower_test eager_test
+	rm -f geom_test pool_test lower_test eager_test tensor_test
