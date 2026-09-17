@@ -14,18 +14,54 @@ make check                    # imports it and prints the geometry
 ./test_ops.py                 # the binding end to end, from torch
 ```
 
-## What it does today, exactly
+## It runs
 
-**The placement is real.** It reads the geometry from the loaded `pim.ko` and sizes
-every weight and both KV caches the way `pim_tensor_bytes()` will size them —
-padding counted, not estimated. That answers *does this model fit, and at what
-context length*, which has to be settled before anything is downloaded.
+Llama-3.2-1B, every linear and both attention matmuls on the card:
 
-**The generation runs on torch**, and says so on every run. The C layers below it
-(`pim_tensor`, `pim_matvec_logical`) are built and board-verified, but the per-op
-binding is not written yet, so nothing dispatches to the card. A fallback that
-quietly produced the same text would be the worst kind of scaffolding: it looks
-finished.
+```
+The capital of France is Paris. It is the most populous city in France and the world's 4
+
+  16 tokens in 6.64 s  (2.41 tok/s)
+  23872 ops, 23936 launches, 2268800 ISRs, 773376 vector loads, 2.32 s on the doorbell
+```
+
+**The text differs from torch's, and that is not evidence of anything.** Greedy
+decoding argmaxes over 128256 logits; a near-tie swaps on the smallest arithmetic
+difference and the sequences diverge and stay fluent. `./check_vs_torch.py` compares
+one forward pass *before* the argmax, which is the question that can be answered:
+
+```
+  max relative error   0.0090   (of a 20.9 logit range)
+  correlation          0.999944
+  top-5
+    0  torch  ' Paris'  20.875   pim  ' Paris'  20.875
+    1  torch      ' a'  19.375   pim      ' a'  19.375
+    2  torch    ' the'  19.125   pim    ' the'  19.125
+    3  torch    ' one'  18.375   pim   ' also'  18.375 <-
+    4  torch   ' also'  18.250   pim    ' one'  18.250 <-
+```
+
+Ranks 3 and 4 swapped at *identical logit values* — that is the near-tie, visible.
+Block floating point takes the maximum exponent over a beat's sixteen products and
+truncates the rest during alignment, so a fraction of a percent is the hardware
+working, not a defect.
+
+## What runs where
+
+| on the card | on the host |
+|---|---|
+| every `nn.Linear`, `lm_head` included | `embed_tokens` — a lookup, not a matmul |
+| Q·Kᵀ | mask + softmax — the card has no `exp` and no `max` |
+| S·V | RMSNorm, RoPE, SiLU, residuals — elementwise over `[1, hidden]` |
+| K and V caches, resident | sampling |
+
+The softmax in the middle of attention is what forces a GPR round trip per head per
+layer. No rearrangement removes it: it is the one operation in attention this
+hardware cannot do.
+
+**GQA is free.** `repeat_kv` materialises H_q/H_kv copies of K and V; the PIM
+attention function never calls it. Several query heads simply name the same
+`red_off`.
 
 ## Why the budget module has no device in it
 

@@ -83,6 +83,9 @@ def main() -> int:
                          "that is loaded")
     ap.add_argument("--dry-run", action="store_true",
                     help="placement only; do not load the model or generate")
+    ap.add_argument("--backend", choices=("pim", "torch"), default="pim",
+                    help="pim runs the linears and both attention matmuls on the "
+                         "card; torch is the reference")
     args = ap.parse_args()
 
     # ---- 1. the geometry ---------------------------------------------------
@@ -120,28 +123,39 @@ def main() -> int:
         return 1
 
     # ---- 3. generation -----------------------------------------------------
-    #
-    # ON TORCH, AND SAYING SO.  The PIM kernels exist and are board-verified, but
-    # nothing dispatches to them yet.  A fallback that produced the same text
-    # without mentioning it would be the worst kind of scaffolding: it looks
-    # finished.
     print("\n=== generation ===")
-    print("  BACKEND: torch (CPU).  The PIM path is not wired in yet — the C layers "
-          "are built\n           and verified, the per-op binding is not.  The "
-          "placement above is real.")
+    hf_id = shape.hf_id or args.model
     try:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as e:
         print(f"\nERROR: {e}.  `pip install torch transformers` in this env.",
               file=sys.stderr)
         return 2
 
-    # The short names are shapes, not repositories.  Resolve to what transformers
-    # can actually fetch, and say which it used — a download that fails should not
-    # make you guess whether the name or the network was wrong.
-    hf_id = shape.hf_id or args.model
-    print(f"  loading {hf_id}")
+    if args.backend == "pim":
+        from pimllm.model import PimModel
+        print("  BACKEND: pim — every linear and both attention matmuls run on the "
+              "card.\n           RMSNorm, RoPE, SiLU, softmax and the embedding "
+              "lookup stay on the host;\n           see pimllm/model.py for why "
+              "each one does.")
+        m = PimModel(hf_id, s_max=args.s_max, geometry=g, verbose=True)
+        t0 = time.monotonic()
+        text = m.generate(args.prompt, max_new_tokens=args.max_new_tokens)
+        dt = time.monotonic() - t0
+        st = m.rt.stats()
+        print(f"\n{text}")
+        print(f"\n  {args.max_new_tokens} tokens in {dt:.2f} s  "
+              f"({args.max_new_tokens / dt:.2f} tok/s)")
+        print(f"  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISRs, "
+              f"{st['nwrvec']} vector loads, {st['launch_us'] / 1e6:.2f} s on the "
+              f"doorbell")
+        m.free()
+        return 0
+
+    # The reference.  Same model, same prompt, nothing on the card.
+    print("  BACKEND: torch (CPU) — the reference path.")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tok = AutoTokenizer.from_pretrained(hf_id)
     model = AutoModelForCausalLM.from_pretrained(hf_id, dtype=torch.bfloat16)
     model.eval()
