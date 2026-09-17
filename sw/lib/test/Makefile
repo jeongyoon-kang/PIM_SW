@@ -41,11 +41,15 @@ pool_test: pool_test.c $(LIB)
 # lower_test links the runtime's two code-generation passes as well, and hwdef for
 # the ISR encoder.  It still needs no board: the addresses it resolves come from the
 # same simulated driver pool_test uses.
-lower_test: lower_test.c $(LIB) ../pim_memcpy.c ../../runtime/pim_lower.c ../../runtime/pim_gemv.c \
+#
+# ../pim_memcpy.c IS DELIBERATELY ABSENT from all of these.  fake_drv.h supplies
+# pim_memcpy_ctx against its simulated card, so a host test can read back what it
+# wrote; the real one would pwrite to a closed fd.
+lower_test: lower_test.c $(LIB) ../../runtime/pim_lower.c ../../runtime/pim_gemv.c \
             ../../runtime/pim_exec.c ../../runtime/pim_mac_exact.c
 	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ $(LDLIBS)
 
-eager_test: eager_test.c $(LIB) ../pim_memcpy.c ../../runtime/pim_gemv.c \
+eager_test: eager_test.c $(LIB) ../../runtime/pim_gemv.c \
             ../../runtime/pim_lower.c ../../runtime/pim_exec.c ../../runtime/pim_mac_exact.c
 	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ $(LDLIBS)
 

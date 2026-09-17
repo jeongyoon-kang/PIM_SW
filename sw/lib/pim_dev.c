@@ -369,9 +369,14 @@ const pim_geometry *pim_geom(void)         { return pim_geom_ctx(pim_default());
 
 void *pim_alloc(size_t nbytes, pim_mem where)
 {
+    return pim_alloc_ex(nbytes, where, 0);
+}
+
+void *pim_alloc_ex(size_t nbytes, pim_mem where, unsigned flags)
+{
     pim_ctx *c = pim_default();
     if (!c) { errno = ENODEV; return NULL; }
-    return pim_alloc_ctx(c, nbytes, where);
+    return pim_alloc_ex_ctx(c, nbytes, where, flags);
 }
 
 void   pim_free  (void *p)                     { pim_free_ctx(pim_default(), p); }

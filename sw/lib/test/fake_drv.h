@@ -104,6 +104,121 @@ int pim_ioctl_free(pim_ctx *c, pim_mem m, const struct pim_extent *ext,
     return 0;
 }
 
+// ---------------- simulated card memory --------------------------------------
+// WHY A TEST NEEDS BYTES AND NOT JUST A BITMAP.  The bitmap above answers "do two
+// allocations overlap".  It cannot answer "did this land where the layout says it
+// should", and that is the question pim_tensor's whole design rests on: an append
+// writing one element too far is a wrong number rather than a crash, and no amount
+// of address arithmetic checked against itself would notice.  So the fake grows a
+// backing store and a pim_memcpy_ctx that honours pim_resolve, and a host test can
+// then read the card back and compare.
+//
+// POISONED, NOT ZEROED, and lazily.  Zero-filled storage would make
+// PIM_ALLOC_F_ZERO vacuous — every test would pass whether or not it cleared
+// anything.  Poison is also what the real board gives you, since nothing zeroes a
+// region between users.  Per-hugepage allocation keeps that honest without paying
+// for the 512 MiB the fake DRAM region nominally spans; a test touches a handful.
+#define FAKE_POISON  0xA5
+
+static unsigned char *card[PIM_NMEM][NR_MAX];
+
+// Host pointer for one AXI address, and how many bytes remain in its hugepage.
+static unsigned char *card_at(pim_mem m, uint64_t axi, size_t *room)
+{
+    uint64_t off, idx, within;
+
+    if (axi < rbase[m]) return NULL;
+    off = axi - rbase[m];
+    idx = off / rhugepage[m];
+    within = off % rhugepage[m];
+    if (idx >= rn[m]) return NULL;
+    if (!card[m][idx]) {
+        card[m][idx] = malloc(rhugepage[m]);
+        if (!card[m][idx]) return NULL;
+        memset(card[m][idx], FAKE_POISON, rhugepage[m]);
+    }
+    *room = (size_t)(rhugepage[m] - within);
+    return card[m][idx] + within;
+}
+
+// Replaces pim_memcpy.c, and deliberately goes through pim_resolve_ctx rather than
+// reading rec->gran_addr[] directly: a test that used the same private path as the
+// code under test would agree with it by construction.
+const char *pim_memcpy_ctx(pim_ctx *c, void *dst, const void *src, size_t n,
+                           pim_dir dir, unsigned flags)
+{
+    const void    *devp = (dir == PIM_TO_DEV) ? dst : src;
+    unsigned char *hostp = (unsigned char *)((dir == PIM_TO_DEV) ? (void *)src : dst);
+    size_t done = 0;
+
+    (void)flags;
+    if (!c) return "pim_memcpy_ctx: no context";
+
+    while (done < n) {
+        pim_loc     loc;
+        size_t      run, room, step;
+        unsigned char *cp;
+        const char *bad = pim_resolve_ctx(c, (const char *)devp + done, 1, &loc, &run);
+
+        if (bad) return bad;
+        if (run > n - done) run = n - done;
+        cp = card_at(loc.mem, loc.axi, &room);
+        if (!cp) return "fake card: address outside the simulated region";
+        step = run < room ? run : room;
+        if (dir == PIM_TO_DEV) memcpy(cp, hostp + done, step);
+        else                   memcpy(hostp + done, cp, step);
+        done += step;
+    }
+    return NULL;
+}
+
+const char *pim_memcpy(void *dst, const void *src, size_t n, pim_dir dir, unsigned f)
+{ return pim_memcpy_ctx(pim_default(), dst, src, n, dir, f); }
+
+// The rest of pim_memcpy.c's surface.  pim_exec.c reaches the control plane through
+// these — BAR2, not a pim_alloc pointer — so they take a raw AXI address and skip
+// the ledger entirely.  The fake serves them from the same backing store, which is
+// what lets lower_test build a program and an exec engine with no board.
+const char *pim_axi_allow_ctx(pim_ctx *c, uint64_t base, uint64_t bytes)
+{ (void)c; (void)base; (void)bytes; return NULL; }
+
+static const char *fake_axi(uint64_t axi, void *host, size_t n, bool to_dev)
+{
+    size_t done = 0;
+
+    while (done < n) {
+        size_t room, step;
+        unsigned char *cp = NULL;
+
+        for (int m = 0; m < PIM_NMEM && !cp; m++)
+            if (axi + done >= rbase[m] &&
+                axi + done <  rbase[m] + rn[m] * rhugepage[m])
+                cp = card_at((pim_mem)m, axi + done, &room);
+        if (!cp) return "fake card: AXI address outside every simulated region";
+        step = (n - done) < room ? (n - done) : room;
+        if (to_dev) memcpy(cp, (unsigned char *)host + done, step);
+        else        memcpy((unsigned char *)host + done, cp, step);
+        done += step;
+    }
+    return NULL;
+}
+
+const char *pim_axi_write_ctx(pim_ctx *c, uint64_t axi, const void *src, size_t n)
+{ (void)c; return fake_axi(axi, (void *)src, n, true); }
+
+const char *pim_axi_read_ctx(pim_ctx *c, uint64_t axi, void *dst, size_t n)
+{ (void)c; return fake_axi(axi, dst, n, false); }
+
+// What is on the card right now at `axi`, whatever wrote it.  For a test that wants
+// to look without going through a pointer it is checking.
+__attribute__((unused))
+static unsigned char fake_peek(pim_mem m, uint64_t axi)
+{
+    size_t room;
+    unsigned char *p = card_at(m, axi, &room);
+    return p ? *p : 0;
+}
+
 // ---------------- harness ----------------------------------------------------
 static pim_ctx *mkctx(unsigned nch)
 {

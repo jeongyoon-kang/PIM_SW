@@ -43,6 +43,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -446,7 +447,45 @@ static pim_alloc_rec *rec_remove(pim_ctx *ctx, const void *ptr)   // exact vbase
 //////////////////////////////////////////////////////////////////////////////////
 // §4  THE PUBLIC ALLOCATOR
 //////////////////////////////////////////////////////////////////////////////////
+
+// PIM_ALLOC_F_ZERO.  One host buffer of zeroes, pushed over the allocation in
+// chunks.
+//
+// NOT ONE TRANSFER OF `bytes`.  A host buffer the size of the allocation would be
+// the obvious shape and it is the wrong one: the KV tensors this exists for are
+// hundreds of megabytes, and asking the host for that much just to send zeroes
+// would fail on exactly the allocations that need it most.  A fixed buffer costs
+// nothing and pim_memcpy already splits each chunk across whatever granule runs it
+// spans, so the transfer count is the same either way.
+//
+// AFTER THE LOCK IS DROPPED, because pim_memcpy_ctx resolves the pointer and takes
+// ctx->lock itself.  That is safe here only because the allocation is not yet
+// visible to the caller: the pointer has not been returned, so nothing else can
+// reach it however many threads are running.
+#define ZERO_CHUNK  (256u << 10)
+
+static const char *zero_fill(pim_ctx *ctx, void *ptr, size_t bytes)
+{
+    size_t      chunk = bytes < ZERO_CHUNK ? bytes : ZERO_CHUNK;
+    void       *zeroes = calloc(1, chunk);
+    const char *bad = NULL;
+    size_t      off;
+
+    if (!zeroes) { errno = ENOMEM; return "out of host memory for the zero buffer"; }
+    for (off = 0; off < bytes && !bad; off += chunk) {
+        size_t n = bytes - off < chunk ? bytes - off : chunk;
+        bad = pim_memcpy_ctx(ctx, (char *)ptr + off, zeroes, n, PIM_TO_DEV, 0);
+    }
+    free(zeroes);
+    return bad;
+}
+
 void *pim_alloc_ctx(pim_ctx *ctx, size_t nbytes, pim_mem where)
+{
+    return pim_alloc_ex_ctx(ctx, nbytes, where, 0);
+}
+
+void *pim_alloc_ex_ctx(pim_ctx *ctx, size_t nbytes, pim_mem where, unsigned flags)
 {
     pim_alloc_rec *rec;
     const pim_region *region;
@@ -455,6 +494,25 @@ void *pim_alloc_ctx(pim_ctx *ctx, size_t nbytes, pim_mem where)
     uint32_t ngrans;
 
     if (!ctx || !nbytes)          { errno = EINVAL; return NULL; }
+    if (flags & ~(PIM_ALLOC_F_ZERO | PIM_ALLOC_F_CONTIG)) {
+        pim_set_err(ctx, "pim_alloc_ex: flags %#x has bits this version does not "
+                         "define; they are reserved and must be zero", flags);
+        errno = EINVAL;
+        return NULL;
+    }
+    if (flags & PIM_ALLOC_F_CONTIG) {
+        // Refused rather than forwarded.  The driver's PIM_ALLOC_CONTIG makes
+        // HUGEPAGES adjacent, which is not what this flag promises: the pool still
+        // hands out whichever granules inside them are free, so a caller told "yes"
+        // could still get a scattered gran_addr[] and a transfer per granule.  The
+        // honest version is a run search in pool_take(); until that exists, saying
+        // no is the only answer that cannot mislead.
+        pim_set_err(ctx, "PIM_ALLOC_F_CONTIG is reserved and not implemented: it "
+                         "would need a consecutive-run search in the granule pool, "
+                         "not the driver's hugepage-level flag");
+        errno = ENOTSUP;
+        return NULL;
+    }
     if ((unsigned)where >= PIM_NMEM) {
         pim_set_err(ctx, "pim_alloc: %u is not a memory region", (unsigned)where);
         errno = EINVAL;
@@ -518,6 +576,22 @@ void *pim_alloc_ctx(pim_ctx *ctx, size_t nbytes, pim_mem where)
         return NULL;
     }
     pthread_mutex_unlock(&ctx->lock);
+
+    // THE CONTRACT IS THE POINT.  A caller that asked for zeroes and got a live
+    // pointer to memory that is not zero has no way to find out, so a failure here
+    // must take the allocation with it rather than degrade to pim_alloc's promise.
+    if (flags & PIM_ALLOC_F_ZERO) {
+        const char *bad = zero_fill(ctx, rec->vbase, bytes);
+        if (bad) {
+            char keep[PIM_ERRBUF];
+            snprintf(keep, sizeof keep, "%s", bad);
+            pim_free_ctx(ctx, rec->vbase);
+            pim_set_err(ctx, "PIM_ALLOC_F_ZERO could not clear %zu bytes: %s",
+                        bytes, keep);
+            errno = EIO;
+            return NULL;
+        }
+    }
     return rec->vbase;
 }
 

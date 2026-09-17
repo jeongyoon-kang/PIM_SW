@@ -125,7 +125,40 @@ pim_ctx    *pim_default(void);
 const char *pim_last_error(void);
 const pim_geometry *pim_geom(void);
 
+/* ============================== allocation flags ===========================
+ * pim_alloc() is malloc: the bytes it returns are WHATEVER WAS THERE BEFORE.  On
+ * this board that is not only a previous allocation of this process — the card is
+ * shared, and nothing zeroes a region between users the way the kernel zeroes a
+ * fresh page between processes.  Say so rather than let a caller assume otherwise.
+ *
+ * WHY A FLAGS WORD AND NOT A SECOND FUNCTION NAME.  There is already a second user
+ * waiting: PIM_ALLOC_CONTIG has sat in the driver ABI since the first version and
+ * libpim has never passed it.  One extensible door beats a name per combination.
+ *
+ * (The names carry _F_ because uapi/pim_ioctl.h already owns PIM_ALLOC_CONTIG with
+ * a different value, and lib/pim_internal.h includes both headers.) */
+
+/* Hand back memory that reads as zero.  Costs one pass of DMA over the whole
+ * allocation — about 1.4 ms per MiB at the measured 710 MB/s — so it is for memory
+ * whose UNWRITTEN parts are read, not for a buffer about to be overwritten.
+ *
+ * The case it exists for is a KV cache's V tensor.  Its reduction axis is the
+ * sequence, so the final beat of any launch straddles the write frontier and a MAC
+ * reads past it.  Zero there is not merely tidy: these lanes take part in a block
+ * float, where one garbage lane with a large exponent shifts the real values of the
+ * same beat into nothing, and a NaN would propagate through a zeroed multiplier. */
+#define PIM_ALLOC_F_ZERO    0x1u
+
+/* RESERVED, AND REFUSED TODAY.  It would mean "granules at consecutive PIM
+ * addresses, or fail" — so that pim_resolve() returns one run and a transfer is one
+ * DMA.  That is a stronger promise than the driver's PIM_ALLOC_CONTIG, which only
+ * makes HUGEPAGES adjacent and says nothing about which granules inside them the
+ * pool then hands out.  Delivering it needs a run search in pool_take(), not a flag
+ * forwarded to an ioctl.  Refusing beats accepting it and quietly not doing it. */
+#define PIM_ALLOC_F_CONTIG  0x2u
+
 void  *pim_alloc(size_t nbytes, pim_mem where);
+void  *pim_alloc_ex(size_t nbytes, pim_mem where, unsigned flags);
 void   pim_free (void *p);
 size_t pim_usable(const void *p);
 bool   pim_where (const void *p, pim_mem *out);
@@ -178,6 +211,7 @@ const pim_geometry *pim_geom_ctx(const pim_ctx *c);
  * NULL and errno on failure — ENOMEM when that pool is full, ENOSPC when the host is
  * out of address space or VMAs.  Ask pim_usable() for what you actually got. */
 void  *pim_alloc_ctx(pim_ctx *c, size_t nbytes, pim_mem where);
+void  *pim_alloc_ex_ctx(pim_ctx *c, size_t nbytes, pim_mem where, unsigned flags);
 void   pim_free_ctx (pim_ctx *c, void *p);
 
 /* Bytes actually reserved for p — nbytes rounded up to that pool's granule.  0 if p

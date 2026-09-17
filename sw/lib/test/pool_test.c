@@ -144,6 +144,67 @@ int main(void)
       CHECK(v == NULL, "an 8 MiB GPR allocation succeeded; the region is 4 MiB");
       printf("7. over-sized gpr request refused: \"%s\"\n", pim_last_error_ctx(c)); }
 
+    // ---- 8. pim_alloc_ex: the two contracts, told apart -------------------
+    // The fake card is POISONED, not zeroed (fake_drv.h), so this distinguishes
+    // "cleared it" from "it happened to be clear".  Against a calloc'd backing store
+    // both branches would pass and the flag would be untested while appearing tested.
+    //
+    // THE SECOND ALLOCATION MUST LAND ON THE SAME GRANULES, or it would be reading
+    // memory nothing had poisoned.  Checked by AXI and not by the host pointer:
+    // vspace_reserve mmaps a fresh range every time, so the two pointers differ even
+    // when the card memory behind them is identical — which is the whole reason the
+    // record table exists.
+    {
+        size_t   n = 128u << 10;               /* two granules at nch = 2 */
+        unsigned char *back = malloc(n);
+        void    *dirty, *clean;
+        pim_loc  ld, lc;
+        size_t   run, nonzero = 0, poisoned = 0;
+
+        dirty = pim_alloc_ex_ctx(c, n, PIM_MEM_DRAM, 0);
+        CHECK(dirty != NULL, "plain pim_alloc_ex failed: %s", pim_last_error_ctx(c));
+        if (dirty) {
+            CHECK(!pim_resolve_ctx(c, dirty, n, &ld, &run), "resolve");
+            CHECK(!pim_memcpy_ctx(c, back, dirty, n, PIM_FROM_DEV, 0), "readback");
+            for (size_t i = 0; i < n; i++) if (back[i] == FAKE_POISON) poisoned++;
+            CHECK(poisoned == n, "plain alloc cleared %zu of %zu bytes it should "
+                                 "have left alone", n - poisoned, n);
+            pim_free_ctx(c, dirty);
+        }
+
+        clean = pim_alloc_ex_ctx(c, n, PIM_MEM_DRAM, PIM_ALLOC_F_ZERO);
+        CHECK(clean != NULL, "PIM_ALLOC_F_ZERO failed: %s", pim_last_error_ctx(c));
+        if (clean && dirty) {
+            CHECK(!pim_resolve_ctx(c, clean, n, &lc, &run), "resolve");
+            CHECK(lc.axi == ld.axi, "the pool handed out %#"PRIx64" this time and "
+                  "%#"PRIx64" last time, so nothing had poisoned what F_ZERO cleared",
+                  lc.axi, ld.axi);
+            CHECK(!pim_memcpy_ctx(c, back, clean, n, PIM_FROM_DEV, 0), "readback");
+            for (size_t i = 0; i < n; i++) if (back[i]) nonzero++;
+            CHECK(nonzero == 0, "PIM_ALLOC_F_ZERO left %zu of %zu bytes unzeroed",
+                  nonzero, n);
+            pim_free_ctx(c, clean);
+        }
+        printf("8. same granules at %#"PRIx64": plain alloc %zu/%zu bytes still "
+               "poison, F_ZERO %zu/%zu nonzero\n",
+               ld.axi, poisoned, n, nonzero, n);
+        free(back);
+    }
+
+    // ---- 9. the flags word refuses what it does not implement -------------
+    {
+        void *p = pim_alloc_ex_ctx(c, 64u<<10, PIM_MEM_DRAM, PIM_ALLOC_F_CONTIG);
+        CHECK(p == NULL, "PIM_ALLOC_F_CONTIG was accepted; it is not implemented");
+        printf("9. F_CONTIG refused: \"%.72s...\"\n", pim_last_error_ctx(c));
+
+        p = pim_alloc_ex_ctx(c, 64u<<10, PIM_MEM_DRAM, 0x80u);
+        CHECK(p == NULL, "an undefined flag bit was accepted");
+        printf("   undefined bit refused: \"%.60s...\"\n", pim_last_error_ctx(c));
+    }
+
+    pim_pool_trim(c, PIM_MEM_DRAM, true);
+    CHECK(out[0] == 0, "%u dram hugepages leaked after the flag tests", out[0]);
+
     printf("\n%s\n", fail ? "FAIL" : "all checks passed");
     return fail != 0;
 }
