@@ -22,7 +22,7 @@ LDFLAGS ?= -L.. -L../../lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../
 LDLIBS  ?= -lpimrt -lpim
 
 .PHONY: all run clean
-all: gemv_test tlatch_test col_probe eager_board tensor_board xfer_bench
+all: gemv_test tlatch_test col_probe eager_board tensor_board op_board xfer_bench
 
 %_test: %_test.c ../libpimrt.so ../../lib/libpim.so \
         ../../include/pimrt/pim_gemv.h ../../include/pimrt/pim_exec.h
@@ -47,6 +47,12 @@ col_probe: col_probe.c
 tensor_board: tensor_board.c
 	$(CC) $(CFLAGS) -I../../../hwdef -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# op_board needs no hwdef: pim_op_matvec is the point at which the ISR encoding
+# stops being the caller's problem, and a test that reached for emu_regs.h here
+# would be testing a layer below the one it is about.
+op_board: op_board.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 eager_board: eager_board.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -61,4 +67,4 @@ run: all
 	./tlatch_test
 
 clean:
-	rm -f gemv_test tlatch_test col_probe eager_board tensor_board xfer_bench
+	rm -f gemv_test tlatch_test col_probe eager_board tensor_board op_board xfer_bench

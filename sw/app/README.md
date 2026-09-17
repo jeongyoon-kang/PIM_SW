@@ -5,6 +5,15 @@
 ./generate.py --model llama-3.2-1b --prompt "..."  # ...and generate
 ```
 
+## Build
+
+```bash
+make -C ..                    # libpim + libpimrt
+make PYTHON=$(which python)   # _pim.so, the per-op binding
+make check                    # imports it and prints the geometry
+./test_ops.py                 # the binding end to end, from torch
+```
+
 ## What it does today, exactly
 
 **The placement is real.** It reads the geometry from the loaded `pim.ko` and sizes
@@ -62,9 +71,38 @@ pimllm/device.py     ctypes over libpim: geometry, meminfo.  The only file that
 pimllm/budget.py     shapes, padding, and where every tensor goes.  No device
 ```
 
+## The binding
+
+`_pim.cpp` is the only C++ in the tree and does nothing but marshal. It takes raw
+pointers because BF16 has no numpy dtype, so no torch tensor can cross through the
+buffer protocol — `data_ptr()` is the honest way, and it keeps torch out of the C++
+entirely.
+
+`pimllm/ops.py` is where a bad pointer is made hard to pass, because dtype, shape and
+contiguity are visible there and not below. It refuses a float32 vector, a non-CPU
+tensor and a strided view, and it deliberately does **not** call `.contiguous()` for
+you: that would hide a copy of a several-hundred-megabyte weight, and a temporary's
+`data_ptr()` is dangling by the time the binding dereferences it. That last one was a
+real use-after-free, found by `test_ops.py` on its first run.
+
+```python
+from pimllm import ops
+rt = ops.Runtime(max_red=4096, max_out_groups=128)
+W  = ops.Tensor.from_weight(linear.weight)     # [out, in] IS OUT_MAJOR
+y  = rt.matvec(W, x)[:out_features]            # padding outputs come back too
+```
+
+One op, not three: `pim_matvec_logical` showed a linear layer, a Q·Kᵀ and an S·V are
+the same call with different arguments, so the model's vocabulary stays in Python.
+
+| kernel | `m` | `red_off` | `red_len` |
+|---|---|---|---|
+| linear | W, OUT_MAJOR | 0 | `in_features` |
+| Q·Kᵀ | K, OUT_MAJOR | `head * D` | `D` |
+| S·V | V, RED_MAJOR | 0 | `S_kv`, grows |
+
 ## Next
 
-The per-op binding (`pim_op_linear` / `attn_qk` / `attn_sv` behind pybind11), then
 `PimKVCache(CacheLayerMixin)` and `ALL_ATTENTION_FUNCTIONS.register("pim", ...)`.
-`transformers` 5.x wants a layer subclass with five methods, not a `Cache`
-subclass — see the note in `pimllm/budget.py` on which axis each cache grows along.
+`transformers` 5.x wants a **layer** subclass with five methods, not a `Cache`
+subclass.
