@@ -231,9 +231,19 @@ def plan(g: Geometry, s: ModelShape, s_max: int) -> Budget:
 # Shapes for the two targets, so `generate.py --dry-run` works with no model
 # downloaded and no network.  Checked against the published configs; the real ones
 # come from `ModelShape.from_hf_config` once transformers has loaded one.
+# The Instruct variants have IDENTICAL shapes to their base models — same layers,
+# same hidden, same 8 KV heads — so the budget, the layout and every kernel are
+# unchanged.  What differs is entirely on the host: they carry a chat template, and
+# without it a prompt is continued rather than answered.
 KNOWN = {
     "llama-3.2-1b": ModelShape("Llama-3.2-1B", 16, 2048, 32, 8, 64, 8192, 128256,
                                hf_id="meta-llama/Llama-3.2-1B"),
     "llama-3.2-3b": ModelShape("Llama-3.2-3B", 28, 3072, 24, 8, 128, 8192, 128256,
                                hf_id="meta-llama/Llama-3.2-3B"),
+    "llama-3.2-1b-instruct": ModelShape("Llama-3.2-1B-Instruct", 16, 2048, 32, 8, 64,
+                                        8192, 128256,
+                                        hf_id="meta-llama/Llama-3.2-1B-Instruct"),
+    "llama-3.2-3b-instruct": ModelShape("Llama-3.2-3B-Instruct", 28, 3072, 24, 8, 128,
+                                        8192, 128256,
+                                        hf_id="meta-llama/Llama-3.2-3B-Instruct"),
 }

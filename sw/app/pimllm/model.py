@@ -66,6 +66,14 @@ class TimedStreamer(TextStreamer):
             sys.stdout.flush()
             self.text.append(text)
         else:
+            # THE FINAL FLUSH IS TEXT, NOT A MARKER.  TextStreamer holds a token
+            # back until it completes something printable, so at the end it hands
+            # over whatever is still in the buffer — and dropping it loses the last
+            # word.  The first version of this printed "The capital of France is"
+            # with 'Paris.' still stuck in the streamer.
+            if text:
+                sys.stdout.write(f"{text!r:>18}   [flush]\n")
+                self.text.append(text)
             total = now - self.t0
             print(f"\n{''.join(self.text)}\n", flush=True)
             print(f"  {self.n} tokens in {total:.2f} s  "
@@ -196,7 +204,7 @@ class PimModel:
 
     # ------------------------------------------------------------------------
     def generate(self, prompt: str, max_new_tokens: int = 32, stream: bool = True,
-                 **kw) -> str:
+                 chat: bool = False, **kw) -> str:
         """Generate, printing each token as it lands.
 
         STREAMING IS NOT A NICETY HERE.  A token takes seconds, so a run that
@@ -204,13 +212,30 @@ class PimModel:
         minutes at a time — and the per-token rate is the number you actually want
         to see, because it is what says whether the card or the host is the limit.
         """
-        ids = self.tokenizer(prompt, return_tensors="pt")
+        # A BASE MODEL CONTINUES, AN INSTRUCT MODEL ANSWERS, and the difference is
+        # entirely the template — same weights layout, same kernels, same budget.
+        # Applying it when the tokenizer has none would wrap the prompt in markers
+        # the model never saw, so it is asked for rather than guessed.
+        if chat:
+            if not getattr(self.tokenizer, "chat_template", None):
+                raise ValueError(
+                    f"{self.hf_id} has no chat template; it is a base model.  Drop "
+                    f"--chat, or use the -Instruct variant of the same shape — they "
+                    f"are identical on the card."
+                )
+            text = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False, add_generation_prompt=True)
+            ids = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)
+        else:
+            ids = self.tokenizer(prompt, return_tensors="pt")
         self.cache.reset()
         streamer = TimedStreamer(self.tokenizer, self.rt) if stream else None
         with torch.no_grad():
             out = self.model.generate(
                 **ids, max_new_tokens=max_new_tokens, do_sample=False,
-                past_key_values=self.cache, use_cache=True, streamer=streamer, **kw)
+                past_key_values=self.cache, use_cache=True, streamer=streamer,
+                pad_token_id=self.tokenizer.eos_token_id, **kw)
         return self.tokenizer.decode(out[0], skip_special_tokens=True)
 
     def free(self) -> None:
