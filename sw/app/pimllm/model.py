@@ -41,7 +41,7 @@ class TimedStreamer(TextStreamer):
 
     The ISR count per token is the one number that separates "the card is slow" from
     "the host is slow": it does not change with host load, so a token whose time
-    moved while its ISRs did not was spent somewhere other than the board.
+    moved while its ISAs did not was spent somewhere other than the board.
     """
 
     def __init__(self, tokenizer, rt, **kw):
@@ -62,7 +62,7 @@ class TimedStreamer(TextStreamer):
             # that appears four tokens late is worse than no streaming at all.
             self.n += 1
             sys.stdout.write(f"{text!r:>18}   [{self.n:>3}  {now - self.tlast:5.2f}s"
-                             f"  {isr - self.isr0:>7} ISR]\n")
+                             f"  {isr - self.isr0:>7} ISA]\n")
             sys.stdout.flush()
             self.text.append(text)
         else:

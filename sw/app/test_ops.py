@@ -123,7 +123,7 @@ def main() -> int:
             print(f"     {what:<22} {type(e).__name__}: {str(e).splitlines()[0][:58]}")
 
     st = rt.stats()
-    print(f"\n  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISRs, "
+    print(f"\n  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISAs, "
           f"{st['nwrvec']} vector loads, {st['launch_us']} us on the doorbell")
 
     for t in (W, K, V):

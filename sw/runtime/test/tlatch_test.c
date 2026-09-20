@@ -120,7 +120,7 @@ int main(int argc, char **argv)
         { "DUAL   (2 latch) ", PIM_ACC_DUAL,   y2, 0, {0} },
     };
 
-    printf("  %-18s %5s %7s %11s   %s\n", "", "ISRs", "WRVECs", "us/launch", "vs golden");
+    printf("  %-18s %5s %7s %11s   %s\n", "", "ISAs", "WRVECs", "us/launch", "vs golden");
     for (unsigned i = 0; i < 2; i++) {
         for (uint32_t rep = 0; rep < reps; rep++) {
             if ((bad = pim_gemv_ex(c, e, &w, x, xg, yg, r[i].y, r[i].mode, &r[i].st)))

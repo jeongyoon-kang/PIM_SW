@@ -74,7 +74,7 @@ def main() -> int:
     ap.add_argument("--model", default="llama-3.2-1b",
                     help="a built-in shape (llama-3.2-1b / -3b) or a HF model id")
     ap.add_argument("--prompt", default="Walk me through SSD architecture.")
-    ap.add_argument("--max-new-tokens", type=int, default=32)
+    ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--s-max", type=int, default=8192,
                     help="context to reserve KV for.  pim_tensor does not grow, so "
                          "this is what closes the budget")
@@ -148,7 +148,7 @@ def main() -> int:
         m.generate(args.prompt, max_new_tokens=args.max_new_tokens, stream=True,
                    chat=args.chat)
         st = m.rt.stats()
-        print(f"  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISRs, "
+        print(f"  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISAs, "
               f"{st['nwrvec']} vector loads, {st['launch_us'] / 1e6:.2f} s on the "
               f"doorbell")
         m.free()

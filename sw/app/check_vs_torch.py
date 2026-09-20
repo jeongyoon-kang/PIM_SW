@@ -95,7 +95,7 @@ def main() -> int:
         print(f"    {i}  torch {tok.decode([a])!r:>14} {ref[a]:8.3f}   "
               f"pim {tok.decode([b])!r:>14} {got[b]:8.3f} {mark}")
 
-    print(f"\n  {st['nop']} ops, {st['nisr']} ISRs, "
+    print(f"\n  {st['nop']} ops, {st['nisr']} ISAs, "
           f"{st['launch_us'] / 1e6:.2f} s on the doorbell")
 
     # A correlation below this is not precision, it is a different computation.

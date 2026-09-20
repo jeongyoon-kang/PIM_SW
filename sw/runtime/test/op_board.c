@@ -238,7 +238,7 @@ int main(void)
     {
         pim_rt_stat st;
         pim_rt_stat_get(rt, &st);
-        printf("\n  %u ops, %u launches, %u ISRs, %u vector loads, %llu us on the "
+        printf("\n  %u ops, %u launches, %u ISAs, %u vector loads, %llu us on the "
                "doorbell\n", st.nop, st.nlaunch, st.nisr, st.nwrvec,
                (unsigned long long)st.launch_us);
     }

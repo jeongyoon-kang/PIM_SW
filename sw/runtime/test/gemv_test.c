@@ -246,7 +246,7 @@ static void phase0_program(uint32_t nch, uint32_t groups, uint32_t k,
     for (uint32_t u = 0; u < w.ngroups * nch; u++) if (!rd_seen[u])  wrong++;
     free(mac_seen); free(rd_seen);
 
-    printf("  ch%u g%-2u k=%-5u %-6s  %3u ISRs  %2u WRVEC  %2u MAC  %u EOS  "
+    printf("  ch%u g%-2u k=%-5u %-6s  %3u ISAs  %2u WRVEC  %2u MAC  %u EOS  "
            "-> %u field(s) wrong\n", nch, groups, k,
            mode == PIM_ACC_DUAL ? "DUAL" : "SINGLE",
            prog.n, nwrvec, nmac, neos, wrong);
@@ -359,7 +359,7 @@ static int run_one(pim_ctx *c, pim_exec *e, uint32_t n, uint32_t k,
                        y[j], b2f(y[j]), gold[j], b2f(gold[j]));
             wrong++;
         }
-    printf("  n=%-6u k=%-5u -> pad %ux%u, %u grp x %u chunk | %4u ISR %4u WRVEC "
+    printf("  n=%-6u k=%-5u -> pad %ux%u, %u grp x %u chunk | %4u ISA %4u WRVEC "
            "%2u launch %7.1f us | %u/%u exact\n",
            n, k, w.noutpad, w.nredpad, w.ngroups, w.nchunks, st.nisr, st.nwrvec,
            st.nlaunch, (double)st.launch_us, n - wrong, n);
