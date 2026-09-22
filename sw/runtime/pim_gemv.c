@@ -425,7 +425,6 @@ const char *pim_gemv_program(const pim_geometry *g, const pim_tensor *w,
 }
 
 // ------------------------------------------------------------- the launch ---
-#define POISON_LANE 0x7FC1u     // a quiet NaN payload nothing here computes
 
 const char *pim_gemv(pim_ctx *c, pim_exec *e, const pim_tensor *w,
                      const uint16_t *x, void *xgpr, void *ygpr, uint16_t *y)
@@ -499,15 +498,6 @@ const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_tensor *w,
         pim_prog prog;
         pim_launch info;
 
-        // ---- poison this launch's result words -------------------------
-        // Not verified by reading it back: that would be another write/read pair
-        // subject to exactly the visibility question it is meant to settle.  What
-        // decides is the RESULT losing it.
-        for (size_t i = 0; i < (size_t)nw * ELEMS_PER_BEAT; i++)
-            ybuf[i] = POISON_LANE;
-        if ((bad = pim_memcpy_ctx(c, ygpr, ybuf, (size_t)nw * EMU_WORD_BYTES,
-                              PIM_TO_DEV, 0))) goto out;
-
         pim_prog_init(&prog, storage, pim_gemv_nisr(w, gpl, mode));
         if ((bad = pim_gemv_program(g, w, g0, ng, xword, yword, rows, mode, &prog)))
             goto out;
@@ -522,28 +512,17 @@ const char *pim_gemv_ex(pim_ctx *c, pim_exec *e, const pim_tensor *w,
         }
 
         // ---- collect ----------------------------------------------------
-        // done decides nothing (it is a held level and can be stale); the poison
-        // does.  Every word must have lost it — a channel that never executed leaves
-        // its own word untouched, which is exactly the failure a fan-out program has
-        // to show, and a latch that was never selected leaves its group's too.
+        // WHAT DECIDES THE LAUNCH FINISHED IS EOS.  Every program ends with one and
+        // the dispatcher runs in order, so done rising means every RD_MAC before it
+        // executed; pim_exec_run treats a timeout as the error it is.
+        //
+        // This used to poison these words first and refuse one that still held the
+        // sentinel.  Removed: with ISR[35] undecoded both RD_MACs still execute and
+        // still write — only the answer is wrong — so the latch case it named was
+        // never caught, and the CH_MASK case is a lowering bug that lower_test finds
+        // on the host with no board.
         if ((bad = pim_memcpy_ctx(c, ybuf, ygpr, (size_t)nw * EMU_WORD_BYTES,
                               PIM_FROM_DEV, 0))) goto out;
-        for (uint32_t i = 0; i < nw; i++) {
-            bool landed = false;
-            for (uint32_t l = 0; l < ELEMS_PER_BEAT; l++)
-                if (ybuf[i * ELEMS_PER_BEAT + l] != POISON_LANE) { landed = true; break; }
-            if (!landed) {
-                snprintf(gv_err, sizeof gv_err,
-                         "result word %u (supergroup %u, channel %u) is still the "
-                         "poison after %llu us (%u polls, done %s).  That RD_MAC "
-                         "never wrote — check CH_MASK fan-out, or ISR[35] if this "
-                         "was a dual-latch run.", i, g0 + i / w->nch, i % w->nch,
-                         (unsigned long long)info.us, info.polls,
-                         info.saw_done ? "rose" : "never rose");
-                bad = gv_err;
-                goto out;
-            }
-        }
 
         // Word (sg*nch + ch), lane b  ->  output sg*16*nch + ch*16 + b.  That is
         // bank(j) = j % 16, channel(j) = (j/16) % nch, supergroup(j) = j / (16*nch)

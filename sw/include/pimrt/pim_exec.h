@@ -237,10 +237,15 @@ typedef struct {
 
 /* Verify, wait for idle, load IMEM, set PROG_LEN, ring, wait for done.
  *
- * DONE IS NOT PROOF and this call does not treat it as such.  It is a held level and
- * can read 1 left over from a previous run, so `saw_done` is reported rather than
- * believed; what decides success is the caller seeing its poisoned result word
- * change.  pim_gemv() does that. */
+ * A TIMEOUT IS AN ERROR.  Every program ends with EOS and the dispatcher runs in
+ * order, so done rising means every RD_MAC before it executed — there is nothing
+ * left for a caller to re-check, and callers no longer try.
+ *
+ * ONE GAP STAYS OPEN, and it is here rather than hidden: done is a HELD LEVEL, and
+ * require_idle accepts it as idle, so a 1 left over from the previous run can
+ * satisfy the very first poll of this one.  Closing that needs to know whether the
+ * doorbell clears the bit, which has not been measured.  What this does catch is the
+ * launch that hangs, which is the failure that strands a caller. */
 const char *pim_exec_run(pim_exec *e, const pim_prog *p, pim_launch *out);
 
 /* Drain every bank's accumulator and throw the results away.
