@@ -461,13 +461,24 @@ const char *pim_exec_run(pim_exec *e, const pim_prog *p, pim_launch *out)
         if (st & CFR_STATUS_DONE) { if (out) out->saw_done = true; break; }
         if (now_us() - t0 > (uint64_t)e->timeout_ms * 1000ull) break;
     }
+    if (!(cfr_rd(e, CFR_STATUS) & CFR_STATUS_DONE))
+        return ex_err(e, "the program did not finish in %u ms (%u polls, "
+                         "STATUS=%#08x).  The dispatcher is still running it, or it "
+                         "never started.", e->timeout_ms, out ? out->polls : 0,
+                      cfr_rd(e, CFR_STATUS));
     if (out) {
         out->us           = now_us() - t0;
         out->status_after = cfr_rd(e, CFR_STATUS);
     }
-    // Deliberately NOT an error when done never rose.  It is a held level and it can
-    // be stale in either direction; what decides is the caller's poisoned result
-    // word, and a result that landed is still worth reporting.
+    // A TIMEOUT IS THE ERROR IT IS.  This used to return success and let the caller
+    // decide from a poisoned result word; nothing does that any more, so a launch
+    // that never raised done has to say so here or nothing says it at all.
+    //
+    // `done` IS A HELD LEVEL and require_idle above accepts it as idle, so a stale
+    // one from the previous run can satisfy the very first poll.  That is a real gap
+    // and it is not closed here: closing it needs to know whether the doorbell
+    // clears the bit, which has not been measured.  What this does catch is the
+    // launch that hangs, which is the failure that actually strands a caller.
     return NULL;
 }
 

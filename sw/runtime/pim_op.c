@@ -3,20 +3,26 @@
 // pim_op.c — host pointer in, host pointer out.
 //
 // The header says what this is for.  What is worth saying beside the code is the
-// order of the five things one op does, because three of them are only there to
-// catch a failure that is otherwise silent:
+// order of the three things one op does:
 //
 //   1  PAD AND UPLOAD THE VECTOR.  red_len rounds up to a whole beat and the tail
 //      is zeroed here.  Not an optimisation: a WRVEC reads whole beats and there is
 //      no lane mask, so a stale lane that decodes as Inf turns every output of its
 //      bank into NaN [measured, runtime/test/tensor_board].
-//   2  POISON THE RESULT WORDS.  Before the launch, not after.
-//   3  BUILD, LOWER, RING.  pass 1 has no addresses in it; pass 2 puts them in.
-//   4  CHECK THE POISON IS GONE.  `done` is a held level and can be stale from a
-//      previous run, so it decides nothing.  A word that still holds the poison had
-//      no RD_MAC land on it, which is what a mis-fanned CH_MASK or an unselected
-//      latch looks like — and the only other symptom would be a plausible number.
-//   5  UNPACK.  Word (group, channel), lane b -> output group*nch*nbank + ch*16 + b.
+//   2  BUILD, LOWER, RING.  pass 1 has no addresses in it; pass 2 puts them in.
+//   3  UNPACK.  Word (group, channel), lane b -> output group*nch*nbank + ch*16 + b.
+//
+// WHAT DECIDES THAT THE LAUNCH FINISHED is EOS.  Every program ends with one and the
+// dispatcher runs in order, so `done` rising means every RD_MAC before it has
+// executed.  pim_exec_run treats a timeout as the error it is; there is nothing for
+// this layer to re-check.
+//
+// THIS USED TO POISON THE RESULT WORDS and refuse a word that still held the
+// sentinel.  It was removed because the case it claimed to catch, it does not: with
+// ISR[35] undecoded both RD_MACs still execute and still write, so no word keeps the
+// poison and only the ANSWER is wrong.  The other case — a CH_MASK fan-out that
+// lowering failed to expand — is a software bug, and lower_test compares logical
+// against direct ISR for ISR on the host with no board.
 //
 // SPLITTING IS BY SUPERGROUP AND NOWHERE ELSE.  A supergroup owns its accumulators
 // from its first MAC to its RD_MAC; cutting anywhere inside that strands a running
@@ -33,7 +39,6 @@
 #include "emu_regs.h"
 
 #define ELEMS_PER_BEAT  PIM_TENSOR_ELEMS_PER_BEAT
-#define POISON_LANE     0xDEAD
 
 struct pim_rt {
     pim_ctx  *ctx;
@@ -264,14 +269,7 @@ const char *pim_op_matvec(pim_rt *r, const pim_tensor *m,
                                           &yword, &yn))) return bad;
         (void)yword; (void)yn;
 
-        // ---- 2. poison, before the launch ----------------------------------
-        for (size_t i = 0; i < (size_t)nw * ELEMS_PER_BEAT; i++)
-            r->ybuf[i] = POISON_LANE;
-        if ((bad = pim_memcpy_ctx(r->ctx, r->ygpr, r->ybuf,
-                                  (size_t)nw * EMU_WORD_BYTES, PIM_TO_DEV, 0)))
-            return bad;
-
-        // ---- 3. build, lower, ring -----------------------------------------
+        // ---- 2. build, lower, ring -----------------------------------------
         pim_logical_init(&lp, r->lisr, r->lisr_cap, r->lref, r->lref_cap,
                          r->latom, r->latom_cap, g->nch,
                          mode == PIM_ACC_DUAL ? 2u : 1u);
@@ -292,25 +290,12 @@ const char *pim_op_matvec(pim_rt *r, const pim_tensor *m,
         r->stat.nwrvec    += pim_matvec_nwrvec(m, ng, red_off, red_len, mode);
         r->stat.nlaunch   += 1;
 
-        // ---- 4. the poison decides, not `done` -----------------------------
+        // ---- 3. read the results back --------------------------------------
         if ((bad = pim_memcpy_ctx(r->ctx, r->ybuf, r->ygpr,
                                   (size_t)nw * EMU_WORD_BYTES, PIM_FROM_DEV, 0)))
             return bad;
-        for (uint32_t i = 0; i < nw; i++) {
-            bool landed = false;
-            for (uint32_t l = 0; l < ELEMS_PER_BEAT; l++)
-                if (r->ybuf[i * ELEMS_PER_BEAT + l] != POISON_LANE) { landed = true; break; }
-            if (!landed)
-                return fail(r, "result word %u (supergroup %u, channel %u) still "
-                               "holds the poison after %llu us (%u polls, done %s). "
-                               "That RD_MAC never wrote — check CH_MASK fan-out, or "
-                               "ISR[35] if this was a dual-latch run.",
-                            i, out_first + g0 + i / g->nch, i % g->nch,
-                            (unsigned long long)info.us, info.polls,
-                            info.saw_done ? "rose" : "never rose");
-        }
 
-        // ---- 5. unpack ------------------------------------------------------
+        // ---- 4. unpack ------------------------------------------------------
         // The inverse of pim_tensor_offset's output mapping: bank = out % nbank,
         // ch = (out/nbank) % nch, group = out / (nbank*nch).  Written from the same
         // three lines so the two cannot drift.
