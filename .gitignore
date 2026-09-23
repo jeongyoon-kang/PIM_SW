@@ -56,6 +56,19 @@ hwdef/pim_config.h
 *.xsa
 *.bin
 *.elf
+
+# ...EXCEPT the ones under hw/, which are tracked on purpose.
+#
+# They are build output like everything else above, and the argument that keeps
+# them out does not apply: nobody here can rebuild them.  The Vivado project that
+# produced each image is not in this tree, so a PDI is the only form the image
+# exists in, and scripts/reprogram.sh names one by path for every channel — a
+# clone without them cannot bring the board up at all.
+#
+# The .ltx goes with its .pdi because reprogram.sh passes both; the probe file is
+# useless without the image it was generated from and vice versa.
+!hw/**/*.pdi
+!hw/**/*.ltx
 *.rtti
 
 # --------------------------------------------------------- vivado / toolchain --
