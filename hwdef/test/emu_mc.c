@@ -184,68 +184,48 @@ static uint32_t cfr_rd(uint32_t off)
     return v;
 }
 
-static uint32_t viol_rd(unsigned ch, uint32_t off)
-{
-    __sync_synchronize();
-    uint32_t v = *(volatile uint32_t *)(g_bar + PIM_OFF_VIOL + (size_t)ch * 0x1000u + off);
-    __sync_synchronize();
-    return v;
-}
+// v2.0: the statistics are CFR registers and the channel is an address field.
+#define viol_rd(ch, off)  cfr_rd(off)
 static void viol_clear_all(void)
 {
-    for (unsigned ch = 0; ch < PIM_NCH; ch++) {
-        __sync_synchronize();
-        *(volatile uint32_t *)(g_bar + PIM_OFF_VIOL + (size_t)ch * 0x1000u + VIOL_CTRL) = 1u;
-        __sync_synchronize();
-    }
+    __sync_synchronize();
+    *(volatile uint32_t *)(g_bar + EMU_OFF_CFR + VIOL_CTRL) = 1u;  /* all channels */
+    __sync_synchronize();
 }
-// CNT_A/MAX_A 는 [7:0]RCD_RD [15:8]CCD_RD [23:16]RCD_WR [31:24]CCD_WR 로 묶여 있다.
 // ANY 비트가 0이어도 값을 찍는다.  "0 건" 과 "안 읽었음" 은 눈으로 구분돼야 한다.
 // 위반 표를 볼 때 "무슨 예산에서 나온 수치인가" 가 같이 있어야 해석이 된다.
 // 이 값들은 ./emu_timing --scale N --keep 이 걸어둔 것이고, 커널은 건드리지 않는다.
 static void timing_print_now(void)
 {
-    printf("    timing : faw=%u rrd=%u rcd=%u ccd=%u rtp=%u rp=%u wr=%u ras=%u\n",
+    printf("    timing : faw=%u rrd=%u rcd=%u ccd=%u rtp=%u rp=%u wr=%u ras=%u "
+           "mod=%u rpab=%u\n",
            cfr_rd(CFR_T_FAW), cfr_rd(CFR_T_RRD), cfr_rd(CFR_T_RCD), cfr_rd(CFR_T_CCD),
-           cfr_rd(CFR_T_RTP), cfr_rd(CFR_T_RP),  cfr_rd(CFR_T_WR),  cfr_rd(CFR_T_RAS));
+           cfr_rd(CFR_T_RTP), cfr_rd(CFR_T_RP),  cfr_rd(CFR_T_WR),  cfr_rd(CFR_T_RAS),
+           cfr_rd(CFR_T_MOD), cfr_rd(CFR_T_RP_AB));
 }
 
-// REC_WR (write recovery) and ewmul_drop live in CNT_B/MAX_B, not CNT_A/MAX_A, so
-// they have to be read separately — and ANY (+0x404) ORs all of them, which is why a
-// read-only run can show ANY=0xffff with every CNT_A column at zero.  Only a write
-// run can move REC_WR, so its two columns are printed only then; on a read they would
-// be a pair of guaranteed zeros widening the table for nothing.
+// v2.0 은 두 종류뿐이다 — ACT_FILL(ACT -> row buffer 채움, 예산 T_RCD)과
+// PRE_DRAIN(PRE -> 되쓰기 완료, 예산 T_RP 또는 all-bank 면 T_RP_AB).  나머지 예산은
+// 컨트롤러가 자기 발행 시점으로 지키는 self-stall 이라 어길 수가 없다.
+// `writing` 은 더 이상 열을 바꾸지 않는다 — 쓰기 전용 카운터가 없어졌다.
 static void viol_report(bool writing)
 {
+    (void)writing;
     for (unsigned ch = 0; ch < PIM_NCH; ch++) {
-        uint32_t any = viol_rd(ch, VIOL_ANY);
-        printf("\n  violation CSR ch%u ANY: 0x%04x%s\n", ch, any,
+        uint32_t any = (cfr_rd(VIOL_ANY_REG(ch)) >> VIOL_ANY_SHIFT(ch)) & 0xFFFFu;
+        printf("\n  violation stats ch%u ANY: 0x%04x%s\n", ch, any,
                any ? "" : "   (no violations — every row below should read 0)");
         timing_print_now();
-        printf("    bank |   RCD_RD    |   CCD_RD    |   RCD_WR    |   CCD_WR    |%s\n",
-               writing ? "   REC_WR    | drop |" : "");
-        printf("         | cnt    max  | cnt    max  | cnt    max  | cnt    max  |%s\n",
-               writing ? " cnt    max  |  cnt |" : "");
-        printf("    -----+-------------+-------------+-------------+-------------+%s\n",
-               writing ? "-------------+------+" : "");
+        printf("    bank |  ACT_FILL   |  PRE_DRAIN  |\n");
+        printf("         | cnt    max  | cnt    max  |\n");
+        printf("    -----+-------------+-------------+\n");
         for (unsigned b = 0; b < EMU_NBANKS; b++) {
-            uint32_t ca = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_CNT_A);
-            uint32_t ma = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_MAX_A);
-            char wr[32] = "";
+            uint32_t base = VIOL_BANK_BASE(ch, b);
+            uint32_t c = cfr_rd(base + VIOL_CNT), m = cfr_rd(base + VIOL_MAX);
 
-            if (writing) {
-                uint32_t cb = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_CNT_B);
-                uint32_t mb = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_MAX_B);
-                snprintf(wr, sizeof wr, " %3u    %3u  | %4u |",
-                         cb & 0xffu, mb & 0xffu, (cb >> 8) & 0xffu);
-            }
-            printf("    %4u | %3u    %3u  | %3u    %3u  | %3u    %3u  | %3u    %3u  |%s%s\n",
-                   b,
-                   ca         & 0xffu, ma         & 0xffu,
-                   (ca >>  8) & 0xffu, (ma >>  8) & 0xffu,
-                   (ca >> 16) & 0xffu, (ma >> 16) & 0xffu,
-                   (ca >> 24) & 0xffu, (ma >> 24) & 0xffu,
-                   wr,
+            printf("    %4u | %3u  %5u  | %3u  %5u  |%s\n", b,
+                   VIOL_CNT_ACT(c), VIOL_MAX_ACT(m),
+                   VIOL_CNT_PRE(c), VIOL_MAX_PRE(m),
                    ((any >> b) & 1u) ? "  <-- ANY" : "");
         }
     }

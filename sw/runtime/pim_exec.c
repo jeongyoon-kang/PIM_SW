@@ -90,13 +90,13 @@ static uint32_t cfr_rd(pim_exec *e, uint32_t off)
 static void cfr_wr(pim_exec *e, uint32_t off, uint32_t v)
 { *(volatile uint32_t *)(e->ctrl + (EMU_OFF_CFR - CTRL_OFF) + off) = v; }
 
-static uint32_t viol_rd(pim_exec *e, unsigned ch, uint32_t off)
-{ return *(volatile uint32_t *)(e->ctrl + (EMU_OFF_VIOL - CTRL_OFF)
-                                        + (size_t)ch * 0x1000u + off); }
-
-static void viol_wr(pim_exec *e, unsigned ch, uint32_t off, uint32_t v)
-{ *(volatile uint32_t *)(e->ctrl + (EMU_OFF_VIOL - CTRL_OFF)
-                                 + (size_t)ch * 0x1000u + off) = v; }
+// THE STATISTICS ARE CFR REGISTERS NOW.  v2.0 returned the per-channel viol_csr
+// window; the channel is an address field inside the dispatcher's own 4 KiB, so
+// these are cfr_rd/cfr_wr at a higher offset and nothing else.
+//
+// EMU_OFF_VIOL still names the old window in platform/ch2.conf, and that window
+// still DECODES -- it reads zero.  So a reader left pointing there reports a clean
+// run for every program, which is why nothing below uses it.
 
 // Idle means done=1 (a program finished and the FSM is parked) or state=0 (fresh
 // from reset).  Anything else is a kernel in progress.
@@ -519,47 +519,53 @@ const char *pim_exec_scrub(pim_exec *e, uint32_t gpr_word)
     return pim_exec_run(e, &prog, NULL);
 }
 
+// ONE READ, NOT SIXTEEN.  VIOL_ANY0/1 carry a bit per bank, two channels to a
+// register, so the summary costs one access and only a nonzero answer needs the
+// per-bank walk.
 const char *pim_exec_violations(pim_exec *e, unsigned ch, uint32_t *any)
 {
+    uint32_t v;
+
     if (!e || !any) return "pim_exec_violations: null argument";
-    *any = viol_rd(e, ch, VIOL_ANY);
-    if (*any == 0xFFFFFFFFu)
-        return ex_err(e, "the violation CSR for channel %u reads all-ones — that "
-                         "offset decodes nowhere, so there is no such channel", ch);
+    v = cfr_rd(e, VIOL_ANY_REG(ch));
+    if (v == 0xFFFFFFFFu)
+        return ex_err(e, "the CFR reads all-ones at the violation summary — the BAR "
+                         "mapping is stale, or this is a v1 image whose statistics "
+                         "are still at their own window");
+    *any = (v >> VIOL_ANY_SHIFT(ch)) & 0xFFFFu;
     return NULL;
 }
 
 const char *pim_exec_violation_detail(pim_exec *e, unsigned ch, pim_viol *out)
 {
+    const pim_geometry *g;
+
     if (!e || !out) return "pim_exec_violation_detail: null argument";
     memset(out, 0, sizeof *out);
-    if (viol_rd(e, ch, VIOL_ANY) == 0xFFFFFFFFu)
-        return ex_err(e, "no such channel: %u", ch);
+    g = pim_geom_ctx(e->ctx);
+    if (ch >= g->nch) return ex_err(e, "no such channel: %u", ch);
 
     for (unsigned b = 0; b < EMU_NBANKS; b++) {
-        uint32_t base = VIOL_BANK_BASE(b);
-        uint32_t a    = viol_rd(e, ch, base + VIOL_CNT_A);
-        uint32_t bb   = viol_rd(e, ch, base + VIOL_CNT_B);
-        uint32_t mx   = viol_rd(e, ch, base + VIOL_MAX_A) & 0xFFu;
+        uint32_t base = VIOL_BANK_BASE(ch, b);
+        uint32_t cnt  = cfr_rd(e, base + VIOL_CNT);
+        uint32_t mx   = cfr_rd(e, base + VIOL_MAX);
 
-        out->sticky      |= viol_rd(e, ch, base + VIOL_STICKY);
-        out->rcd_rd      +=  a        & 0xFFu;
-        out->ccd_rd      += (a >>  8) & 0xFFu;
-        out->rcd_wr      += (a >> 16) & 0xFFu;
-        out->ccd_wr      += (a >> 24) & 0xFFu;
-        out->recovery_wr +=  bb       & 0xFFu;
-        if (mx > out->worst_rcd_rd) out->worst_rcd_rd = mx;
+        out->sticky    |= cfr_rd(e, base + VIOL_STICKY);
+        out->act_fill  += VIOL_CNT_ACT(cnt);
+        out->pre_drain += VIOL_CNT_PRE(cnt);
+        if (VIOL_MAX_ACT(mx) > out->worst_act_fill)
+            out->worst_act_fill = VIOL_MAX_ACT(mx);
+        if (VIOL_MAX_PRE(mx) > out->worst_pre_drain)
+            out->worst_pre_drain = VIOL_MAX_PRE(mx);
     }
     return NULL;
 }
 
+// ONE REGISTER FOR THE WHOLE BOARD.  v1 cleared each channel's own block; v2.0's
+// VIOL_CTRL[0] wipes every channel and every bank at once.
 const char *pim_exec_clear_violations(pim_exec *e)
 {
-    const pim_geometry *g;
-
     if (!e) return "pim_exec_clear_violations: e is NULL";
-    g = pim_geom_ctx(e->ctx);
-    for (unsigned ch = 0; ch < g->nch; ch++)
-        viol_wr(e, ch, VIOL_CTRL, 1u);
+    cfr_wr(e, VIOL_CTRL, 1u);
     return NULL;
 }

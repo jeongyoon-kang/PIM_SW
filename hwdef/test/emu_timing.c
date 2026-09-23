@@ -112,15 +112,29 @@ static int g_h2c = -1, g_c2h = -1;
 
 // The eight registers are contiguous 4-byte words from CFR_T_FAW, and struct
 // emu_timing lists them in that order — so an index walks both.
-static const char *const TNAME[8] =
-    { "faw", "rrd", "rcd", "ccd", "rtp", "rp", "wr", "ras" };
+// TEN REGISTERS, AND THEY ARE NOT CONTIGUOUS.  v2.0 put T_MOD and T_RP_AB above
+// PROG_LEN and RUN_CYC, so the old "eight in a row from CFR_T_FAW" walk cannot
+// reach them.  The table carries the offset; the index into it is the field order
+// of struct emu_timing, which is what lets the array cast below stay.
+static const struct { const char *name; uint32_t off; } TREG[] = {
+    { "faw",  CFR_T_FAW  }, { "rrd", CFR_T_RRD }, { "rcd", CFR_T_RCD },
+    { "ccd",  CFR_T_CCD  }, { "rtp", CFR_T_RTP }, { "rp",  CFR_T_RP  },
+    { "wr",   CFR_T_WR   }, { "ras", CFR_T_RAS },
+    { "mod",  CFR_T_MOD  },                      /* v2.0 */
+    { "rpab", CFR_T_RP_AB },                     /* v2.0 */
+};
+#define T_NREG ((unsigned)(sizeof TREG / sizeof TREG[0]))
 
 // The base set: HBM2 device timing in controller cycles.  --scale multiplies THESE,
-// and --faw/--rcd/... replace an entry before the multiply.  Field order is struct
-// emu_timing's: faw, rrd, rcd, ccd, rtp, rp, wr, ras.
-static const struct emu_timing TIMING_BASE = { 16, 4, 15, 2, 4, 17, 28, 34 };
+// and --faw/--rcd/... replace an entry before the multiply.
+//
+// THE LAST TWO ARE NOT MEASURED.  mod = 0 means a REGISTER<->BANK switch costs
+// nothing, and rpab = rp means an all-bank precharge is charged like a single-bank
+// one -- which is exactly what v1 did, so this base reproduces v1's behaviour
+// rather than guessing at the difference v2.0 made expressible.  Sweep them.
+static const struct emu_timing TIMING_BASE = { 16, 4, 15, 2, 4, 17, 28, 34, 0, 17 };
 
-#define T_REG_MAX 255u          // dispatcher_top.v:84 — TW = 8
+#define T_REG_MAX CFR_TIMING_MAX   // TW = 10 in v2.0, so 0..1023
 
 static uint64_t now_us(void)
 {
@@ -142,20 +156,10 @@ static void cfr_wr(uint32_t off, uint32_t v)
     *(volatile uint32_t *)(g_bar + EMU_OFF_CFR + off) = v;
     __sync_synchronize();
 }
-static uint32_t viol_rd(unsigned ch, uint32_t off)
-{
-    __sync_synchronize();
-    uint32_t v = *(volatile uint32_t *)
-        (g_bar + PIM_OFF_VIOL + (size_t)ch * 0x1000u + off);
-    __sync_synchronize();
-    return v;
-}
-static void viol_wr_ctrl(unsigned ch, uint32_t v)
-{
-    __sync_synchronize();
-    *(volatile uint32_t *)(g_bar + PIM_OFF_VIOL + (size_t)ch * 0x1000u + VIOL_CTRL) = v;
-    __sync_synchronize();
-}
+// THE STATISTICS ARE CFR REGISTERS IN v2.0 -- the per-channel window is gone and
+// the channel is an address field.  Reads go through cfr_rd; the old window still
+// decodes and reads zero, so a tool left pointing at it reports every run clean.
+#define viol_rd(ch, off)  cfr_rd(off)
 
 // ---- the violation CSR ------------------------------------------------------
 // NOT read-on-clear.  A read leaves every counter exactly as it was; CTRL[0] is
@@ -166,9 +170,10 @@ static bool viol_clear(unsigned nch)
 {
     bool ok = true;
 
-    for (unsigned ch = 0; ch < nch; ch++) viol_wr_ctrl(ch, 1u);
+    (void)0;
+    cfr_wr(VIOL_CTRL, 1u);                 /* one register clears every channel */
     for (unsigned ch = 0; ch < nch; ch++) {
-        uint32_t any = viol_rd(ch, VIOL_ANY);
+        uint32_t any = (cfr_rd(VIOL_ANY_REG(ch)) >> VIOL_ANY_SHIFT(ch)) & 0xFFFFu;
         if (any) {
             fprintf(stderr, "ch%u: the violation CSR did not clear — ANY=0x%04x "
                             "after CTRL[0]=1\n", ch, any & 0xFFFFu);
@@ -178,67 +183,61 @@ static bool viol_clear(unsigned nch)
     return ok;
 }
 
+// TWO KINDS IN v2.0.  Every other budget became a controller self-stall, which
+// cannot be violated; what a bank can still report is that the physical ACT or PRE
+// outran the budget.
 struct viol_sum {
-    unsigned rcd_rd, ccd_rd, rcd_wr, ccd_wr, rec_wr, drop;
-    unsigned worst_rcd_rd, worst_ccd_rd, worst_rcd_wr, worst_ccd_wr, worst_rec_wr;
+    unsigned act_fill, pre_drain;
+    unsigned worst_act_fill, worst_pre_drain;
     unsigned banks;                 // how many banks reported anything at all
     uint32_t any[PIM_NCH];
 };
 
-// Reads every bank of every channel and prints the ones that fired.  ANY (+0x404)
-// first, because one read names the guilty bank instead of sixteen.
+// Reads every bank of every channel and prints the ones that fired.  ANY first,
+// because two reads name the guilty bank instead of sixty-four.
 static void viol_read_print(unsigned nch, struct viol_sum *s)
 {
     bool head = false;
 
     memset(s, 0, sizeof *s);
-    for (unsigned ch = 0; ch < nch; ch++) s->any[ch] = viol_rd(ch, VIOL_ANY) & 0xFFFFu;
+    for (unsigned ch = 0; ch < nch; ch++)
+        s->any[ch] = (cfr_rd(VIOL_ANY_REG(ch)) >> VIOL_ANY_SHIFT(ch)) & 0xFFFFu;
 
     for (unsigned ch = 0; ch < nch; ch++)
         for (unsigned b = 0; b < EMU_NBANKS; b++) {
-            uint32_t st = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_STICKY);
-            uint32_t a  = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_CNT_A);
-            uint32_t bb = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_CNT_B);
-            uint32_t ma = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_MAX_A);
-            uint32_t mb = viol_rd(ch, VIOL_BANK_BASE(b) + VIOL_MAX_B);
-            unsigned c[5] = { a & 0xFFu, (a >> 8) & 0xFFu, (a >> 16) & 0xFFu,
-                              (a >> 24) & 0xFFu, bb & 0xFFu };
-            unsigned m[5] = { ma & 0xFFu, (ma >> 8) & 0xFFu, (ma >> 16) & 0xFFu,
-                              (ma >> 24) & 0xFFu, mb & 0xFFu };
+            uint32_t base = VIOL_BANK_BASE(ch, b);
+            uint32_t st   = cfr_rd(base + VIOL_STICKY);
+            uint32_t cnt  = cfr_rd(base + VIOL_CNT);
+            uint32_t mx   = cfr_rd(base + VIOL_MAX);
+            unsigned ca = VIOL_CNT_ACT(cnt), cp = VIOL_CNT_PRE(cnt);
+            unsigned ma = VIOL_MAX_ACT(mx),  mp = VIOL_MAX_PRE(mx);
 
-            s->rcd_rd += c[0];  s->ccd_rd += c[1];  s->rcd_wr += c[2];
-            s->ccd_wr += c[3];  s->rec_wr += c[4];  s->drop += (bb >> 8) & 0xFFu;
-            if (m[0] > s->worst_rcd_rd) s->worst_rcd_rd = m[0];
-            if (m[1] > s->worst_ccd_rd) s->worst_ccd_rd = m[1];
-            if (m[2] > s->worst_rcd_wr) s->worst_rcd_wr = m[2];
-            if (m[3] > s->worst_ccd_wr) s->worst_ccd_wr = m[3];
-            if (m[4] > s->worst_rec_wr) s->worst_rec_wr = m[4];
-            if (!st && !a && !bb) continue;
+            s->act_fill += ca;  s->pre_drain += cp;
+            if (ma > s->worst_act_fill)  s->worst_act_fill  = ma;
+            if (mp > s->worst_pre_drain) s->worst_pre_drain = mp;
+            if (!st && !cnt) continue;
             s->banks++;
             if (!head) {
-                printf("    ch bk  sticky      RCD_RD CCD_RD RCD_WR CCD_WR REC_WR"
+                printf("    ch bk  sticky      ACT_FILL PRE_DRAIN"
                        " | worst cycles over\n");
                 head = true;
             }
-            printf("    %2u %2u  0x%08x %6u %6u %6u %6u %6u | %u %u %u %u %u\n",
-                   ch, b, st, c[0], c[1], c[2], c[3], c[4],
-                   m[0], m[1], m[2], m[3], m[4]);
+            printf("    %2u %2u  0x%08x %8u %9u | %u %u\n",
+                   ch, b, st, ca, cp, ma, mp);
         }
 
     printf("  violations   :");
     for (unsigned ch = 0; ch < nch; ch++) printf(" ch%u ANY=0x%04x", ch, s->any[ch]);
-    printf("\n                 RCD_RD %u  CCD_RD %u  RCD_WR %u  CCD_WR %u  REC_WR %u"
-           "%s   %s\n",
-           s->rcd_rd, s->ccd_rd, s->rcd_wr, s->ccd_wr, s->rec_wr,
-           s->drop ? "  ewmul_drop!" : "",
+    printf("\n                 ACT_FILL %u (worst +%u)  PRE_DRAIN %u (worst +%u)   %s\n",
+           s->act_fill, s->worst_act_fill, s->pre_drain, s->worst_pre_drain,
            s->banks ? "" : "(every bank clean)");
 }
 
 // ---- timing: the whole point of the tool ------------------------------------
 static void timing_get(struct emu_timing *t)
 {
-    for (unsigned i = 0; i < 8; i++)
-        ((uint8_t *)t)[i] = (uint8_t)cfr_rd(CFR_T_FAW + i * 4u);
+    for (unsigned i = 0; i < T_NREG; i++)
+        ((uint16_t *)t)[i] = (uint16_t)(cfr_rd(TREG[i].off) & CFR_TIMING_MAX);
 }
 
 // base * scale into `out`.  Refuses rather than truncates: the register is 8 bits,
@@ -246,14 +245,15 @@ static void timing_get(struct emu_timing *t)
 // like it had been accepted.
 static bool timing_scale(const struct emu_timing *base, unsigned s, struct emu_timing *out)
 {
-    for (unsigned i = 0; i < 8; i++) {
-        unsigned v = (unsigned)((const uint8_t *)base)[i] * s;
+    for (unsigned i = 0; i < T_NREG; i++) {
+        unsigned v = (unsigned)((const uint16_t *)base)[i] * s;
         if (v > T_REG_MAX) {
-            fprintf(stderr, "--scale %u makes T_%s %u, and the register is 8 bits "
-                            "(dispatcher_top.v TW=8)\n", s, TNAME[i], v);
+            fprintf(stderr, "--scale %u makes T_%s %u, and the register is 10 bits "
+                            "(v2.0 TW=10, so 0..%u)\n", s, TREG[i].name, v,
+                    T_REG_MAX);
             return false;
         }
-        ((uint8_t *)out)[i] = (uint8_t)v;
+        ((uint16_t *)out)[i] = (uint16_t)v;
     }
     return true;
 }
@@ -272,13 +272,13 @@ static bool timing_set(const struct emu_timing *t, bool allow_unsafe)
             "measuring that.\n", t->ccd);
         return false;
     }
-    for (unsigned i = 0; i < 8; i++)
-        cfr_wr(CFR_T_FAW + i * 4u, ((const uint8_t *)t)[i]);
+    for (unsigned i = 0; i < T_NREG; i++)
+        cfr_wr(TREG[i].off, ((const uint16_t *)t)[i]);
     timing_get(&got);
-    for (unsigned i = 0; i < 8; i++)
-        if (((uint8_t *)&got)[i] != ((const uint8_t *)t)[i]) {
+    for (unsigned i = 0; i < T_NREG; i++)
+        if (((uint16_t *)&got)[i] != ((const uint16_t *)t)[i]) {
             fprintf(stderr, "T_%s read back %u after writing %u\n",
-                    TNAME[i], ((uint8_t *)&got)[i], ((const uint8_t *)t)[i]);
+                    TREG[i].name, ((uint16_t *)&got)[i], ((const uint16_t *)t)[i]);
             return false;
         }
     return true;
@@ -287,14 +287,14 @@ static bool timing_set(const struct emu_timing *t, bool allow_unsafe)
 static void timing_print(const char *tag, const struct emu_timing *t)
 {
     printf("%s", tag);
-    for (unsigned i = 0; i < 8; i++)
-        printf(" %s=%-3u", TNAME[i], ((const uint8_t *)t)[i]);
+    for (unsigned i = 0; i < T_NREG; i++)
+        printf(" %s=%-4u", TREG[i].name, ((const uint16_t *)t)[i]);
     printf("\n");
 }
 
 static int tname_index(const char *s)
 {
-    for (int i = 0; i < 8; i++) if (!strcmp(s, TNAME[i])) return i;
+    for (unsigned i = 0; i < T_NREG; i++) if (!strcmp(s, TREG[i].name)) return (int)i;
     if (!strcmp(s, "rbtp")) return 4;      // the bank controller's name for T_RTP
     return -1;
 }

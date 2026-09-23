@@ -280,10 +280,23 @@ const char *pim_exec_violations(pim_exec *e, unsigned ch, uint32_t *any);
 
 /* Per-bank detail for one channel: the summed counters across all 16 banks, and the
  * worst overrun any of them saw.  Counters saturate at 255 per bank and never wrap. */
+/* v2.0 KEEPS TWO KINDS, NOT SIX.  Every budget moved into the controller, which
+ * cannot violate one it enforces on itself; what remains are the two waits on
+ * physical bank behaviour, where the bank took longer than the budget allowed.
+ *
+ *   act_fill    ACT issued -> row buffer filled     over T_RCD
+ *   pre_drain   PRE issued -> write-back finished   over T_RP, or T_RP_AB for an
+ *                                                   all-bank span and EOS's flush
+ *
+ * The v1 names (rcd_rd, ccd_rd, rcd_wr, ccd_wr, recovery_wr) are gone rather than
+ * mapped, because the reading that produced them is gone: tCCD and the rest are
+ * self-stalls now and there is nothing left for them to count. */
 typedef struct {
     uint32_t sticky;        /* OR of every bank's sticky bits    */
-    uint32_t rcd_rd, ccd_rd, rcd_wr, ccd_wr, recovery_wr;
-    uint32_t worst_rcd_rd;  /* cycles                            */
+    uint32_t act_fill;      /* summed over banks, each saturating at 255 */
+    uint32_t pre_drain;
+    uint32_t worst_act_fill; /* cycles over budget, worst bank    */
+    uint32_t worst_pre_drain;
 } pim_viol;
 const char *pim_exec_violation_detail(pim_exec *e, unsigned ch, pim_viol *out);
 const char *pim_exec_clear_violations(pim_exec *e);

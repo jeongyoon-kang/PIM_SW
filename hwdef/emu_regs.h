@@ -117,11 +117,18 @@
 // pim_dma_check(&P, axi, len), pim_window_name(&P, axi).
 
 // ============================== CFR ===========================================
-// dispatcher_top.v decodes only addr[7:0], so the block REPEATS every 256 B
-// inside its 4 KB segment.  Two consequences for host code:
-//   - that aliasing identifies the CFR behaviourally, and
-//   - nothing may be written at an offset whose low byte is 0x00 unless a
-//     doorbell is intended, because 0x00 is CTRL and CTRL[0] is the doorbell.
+// ONE 4 KiB WINDOW, THREE PAGES.  v1 decoded only addr[7:0], so the register block
+// aliased every 256 B and that aliasing was how a probe identified it.  v2.0 ended
+// that: the statistics live at 0x400 and the clear/summary registers at 0x800, so
+// the decode is at least addr[11:0] and there is no aliasing to lean on.
+//
+//   0x000 - 0x03F   registers, RW
+//   0x040 - 0x3FF   reserved, reads 0
+//   0x400 - 0x7FF   per-bank violation statistics, RO
+//   0x800 - 0x808   clear and summary
+//
+// Nothing may be written at an offset whose low byte is 0x00 unless a doorbell is
+// intended: 0x00 is CTRL and CTRL[0] is the doorbell.
 #define CFR_CTRL            0x00u   // W  [0] doorbell (self-clearing)  [1] mode
 #define CFR_STATUS          0x04u   // R  [3:0] fetch FSM state  [31] done
 #define CFR_T_FAW           0x08u
@@ -129,27 +136,57 @@
 #define CFR_T_RCD           0x10u
 #define CFR_T_CCD           0x14u
 #define CFR_T_RTP           0x18u
-#define CFR_T_RP            0x1Cu
+#define CFR_T_RP            0x1Cu   // SINGLE-bank PRE -> ACT
 #define CFR_T_WR            0x20u
 #define CFR_T_RAS           0x24u
 #define CFR_PROG_LEN        0x28u   // 14 bits wide (dispatcher_top.v IMEM_AW)
+#define CFR_RUN_CYC_LO      0x2Cu   // RO  v2.0
+#define CFR_RUN_CYC_HI      0x30u   // RO  v2.0
+#define CFR_T_MOD           0x34u   // v2.0  REGISTER <-> BANK mode switch stall
+#define CFR_T_RP_AB         0x38u   // v2.0  ALL-bank PRE -> ACT
 
 #define CFR_CTRL_DOORBELL   (1u << 0)
 #define CFR_CTRL_MODE_ALLBK (1u << 1)
 #define CFR_STATUS_DONE     (1u << 31)
 #define CFR_STATUS_STATE(s) ((s) & 0xFu)
 #define CFR_PROG_LEN_MAX    ((1u << 14) - 1u)
+#define CFR_TIMING_MAX      ((1u << 10) - 1u)   // TW = 10 bits, so 0..1023
 
-struct emu_timing { uint8_t faw, rrd, rcd, ccd, rtp, rp, wr, ras; };
+// RUN_CYC is a 64-bit count of the cycles the fetcher ran, cleared at the doorbell
+// and frozen when STATUS[31] rises.  READ IT AFTER done, never during: LO and HI
+// are separate reads and LO can roll between them.
+//
+// IT DOES NOT INCLUDE WHAT EOS LEAVES BEHIND.  v2.0 is open-page, so the write-back
+// of the rows EOS precharges happens after this value stops moving.
+#define CFR_RUN_CYC(lo, hi) (((uint64_t)(hi) << 32) | (uint32_t)(lo))
+
+// ELEVEN BUDGETS, NOT EIGHT.  v2.0 added T_MOD and T_RP_AB, and widened every one
+// to 10 bits -- a uint8_t silently truncated 1023 to 255 and the result looked like
+// a timing that was simply fast.
+//
+// T_MOD is new in kind, not just in name.  The controller holds one mode per
+// channel: WRVEC and RD_MAC need REGISTER, MAC/COPY/EWMUL need BANK, and a switch
+// stalls issue for T_MOD cycles.  A WRVEC -> MAC -> RD_MAC schedule therefore pays
+// it TWICE per group, which is what argues for stacking same-family instructions.
+//
+// T_RP_AB is the budget v1 was missing: PRECHARGE ALL was being charged at the
+// single-bank T_RP, so an all-bank span and EOS's flush were both under-counted.
+struct emu_timing {
+    uint16_t faw, rrd, rcd, ccd, rtp, rp, wr, ras;
+    uint16_t mod;      // v2.0  T_MOD
+    uint16_t rp_ab;    // v2.0  T_RP_AB
+};
 
 // HANDOFF §2's starting values.  Two warnings travel with them:
 //   T_CCD MUST NOT drop below 2 — mac_top.sv:26-33, two beats into the same latch
 //   back to back accumulate every OTHER beat, with no diagnostic.
-//   T_RCD=4 DOES raise RCD_RD violations and that is correct: HANDOFF §2 measured
+//   T_RCD=4 DOES raise ACT_FILL violations and that is correct: HANDOFF §2 measured
 //   overrun 3 against an ideal zero-delay memory model.  The emulator is reporting
 //   that memory was slower than the model.  T_RCD=8 is quiet if that is wanted.
-#define EMU_TIMING_SIM    ((struct emu_timing){ 30, 6, 4, 2, 3, 3, 4, 6 })
-#define EMU_TIMING_QUIET  ((struct emu_timing){ 30, 6, 8, 2, 3, 3, 4, 6 })
+// The two v2.0 values are PLACEHOLDERS: nothing has measured what an all-bank
+// precharge or a mode switch actually costs on this image.
+#define EMU_TIMING_SIM    ((struct emu_timing){ 30, 6, 4, 2, 3, 3, 4, 6, 0, 3 })
+#define EMU_TIMING_QUIET  ((struct emu_timing){ 30, 6, 8, 2, 3, 3, 4, 6, 0, 3 })
 
 // ============================== channel address map ===========================
 // WHICH FIELD OF AN ADDRESS NAMES THE CHANNEL.  One bit, and it changes what every
@@ -181,23 +218,51 @@ struct emu_timing { uint8_t faw, rrd, rcd, ccd, rtp, rp, wr, ras; };
 #define MODE_CTRL_INTERLEAVE (1u << 0)
 #define MODE_STATUS_BUSY     (1u << 0)
 
-// ============================== violation CSR =================================
-// Read-only by construction — the host cannot forge a clean run.  Counts saturate
-// at 0xFF and never wrap.  Everything resets to zero (emu_viol_csr.v:283-292), and
-// an offset the block does NOT decode also reads zero (emu_viol_csr.v:47) — which
-// is what tells a live block apart from undecoded BAR space, since the latter
-// reads 0xffffffff.
-#define VIOL_BANK_BASE(b)   ((uint32_t)(b) * 0x40u)
-#define VIOL_STICKY         0x00u   // [0]RCD_RD [1]CCD_RD [2]RCD_WR [3]CCD_WR
-                                    // [4]RECOVERY_WR [8]ewmul_drop [31]any
-#define VIOL_CNT_A          0x04u   // [7:0]RCD_RD [15:8]CCD_RD [23:16]RCD_WR [31:24]CCD_WR
-#define VIOL_CNT_B          0x08u   // [7:0]RECOVERY_WR [15:8]ewmul_drop
-#define VIOL_MAX_A          0x0Cu   // same packing as CNT_A, worst overrun in cycles
-#define VIOL_MAX_B          0x10u   // [7:0]RECOVERY_WR
-#define VIOL_CTRL           0x400u  // W [0] clrstats, self-clearing; reads 0
-#define VIOL_ANY            0x404u  // R [15:0] one bit per bank — read this first
+// ============================== violation statistics ==========================
+// INSIDE THE CFR NOW.  v1 gave each channel its own viol_csr slave at BAR2
+// +0x401000 + ch*0x1000; v2.0 returned that window and put the statistics in the
+// dispatcher's own 4 KiB at 0x400, with the channel as an address field.
+//
+//     addr = CFR + 0x400 + ch*0x100 + bank*0x10 + reg
+//
+// THE OLD WINDOW STILL READS.  0x401000-0x404FFF is decoded and empty, so a v1
+// host reads zeros there and concludes the run was clean.  That is why this is a
+// rename and not an addition -- the v1 names must not survive.
+//
+// TWO KINDS, NOT SIX.  v1 split tRCD and tCCD into read and write and added a
+// recovery and an EWMUL drop.  v2.0 moved every budget into the controller, which
+// cannot violate a budget it enforces on itself: the only things that can overrun
+// are the two PHYSICAL waits, where the bank takes longer than the budget says.
+//
+//     ACT_FILL    ACT issued -> row buffer filled     budget T_RCD
+//     PRE_DRAIN   PRE issued -> write-back finished   budget T_RP, or T_RP_AB
+//                                                     for an all-bank span and for
+//                                                     the flush EOS performs
+//
+// Read-only by construction -- the host cannot forge a clean run.  Counts saturate
+// at 0xFF and never wrap, because a wrapped 0 is indistinguishable from a run that
+// had none.
+#define VIOL_BASE           0x400u
+#define VIOL_BANK_BASE(ch, b)  (VIOL_BASE + (uint32_t)(ch) * 0x100u \
+                                          + (uint32_t)(b)  * 0x10u)
+#define VIOL_STICKY         0x00u   // [0]ACT_FILL [1]PRE_DRAIN [31]any
+#define VIOL_CNT            0x04u   // [7:0]ACT_FILL [15:8]PRE_DRAIN, saturating
+#define VIOL_MAX            0x08u   // [9:0]ACT_FILL [25:16]PRE_DRAIN, cycles over
+#define VIOL_CTRL           0x800u  // W [0] clrstats, self-clearing; reads 0
+#define VIOL_ANY0           0x804u  // R [15:0] ch0 banks  [31:16] ch1 banks
+#define VIOL_ANY1           0x808u  // R [15:0] ch2 banks  [31:16] ch3 banks
 
+// Two reads name the guilty bank instead of sixty-four.
+#define VIOL_ANY_REG(ch)    ((ch) < 2 ? VIOL_ANY0 : VIOL_ANY1)
+#define VIOL_ANY_SHIFT(ch)  (((ch) & 1u) ? 16u : 0u)
+
+#define VIOL_STICKY_ACT     (1u << 0)
+#define VIOL_STICKY_PRE     (1u << 1)
 #define VIOL_STICKY_ANY     (1u << 31)
+#define VIOL_CNT_ACT(v)     ((v) & 0xFFu)
+#define VIOL_CNT_PRE(v)     (((v) >> 8) & 0xFFu)
+#define VIOL_MAX_ACT(v)     ((v) & 0x3FFu)
+#define VIOL_MAX_PRE(v)     (((v) >> 16) & 0x3FFu)
 #define VIOL_STICKY_DROP    (1u << 8)
 
 // ============================== what DMA may touch ============================
@@ -254,6 +319,8 @@ struct emu_timing { uint8_t faw, rrd, rcd, ccd, rtp, rp, wr, ras; };
 #define ISR_OP_WRVEC    0x0Fu   // verified: GPR -> GB vector load
 #define ISR_OP_RD_MAC   0x10u   // verified: 16 BF16 lanes land in a GPR word
 #define ISR_OP_EOS      0x11u   // verified: end of program
+#define ISR_OP_WR_SBK   0x12u   // v2.0: GPR -> GB -> one bank.  NOT verified here
+#define ISR_OP_RD_SBK   0x13u   // v2.0: one bank -> GB -> GPR.  NOT verified here
 
 // route[i] port numbering: 0..15 name a bank, 16 is the GB, 31 is "unused".
 // The default MUST be 31 — 0 means "send to bank 0", which is a real destination.
@@ -281,16 +348,44 @@ static inline uint64_t emu_isr_get(const struct emu_isr *p, unsigned lo, unsigne
     return v;
 }
 
-#define ISR_F_OPCODE    59, 5
-#define ISR_F_OPSIZE    49, 10
+// THE v2.0 PACKING.  v1 left 93 bits of holes between the fields; v2.0 closed
+// them and pulled everything down, so the word is contiguous from 0 to 179 and
+// [255:180] is reserved.  What did NOT move is the bottom 36 bits -- COL, ROW,
+// BK, CH_MASK and T are where they were -- which is exactly why crossing an
+// image with the wrong build does not fail: a v1 program loads, runs, and
+// answers with the wrong numbers.
+//
+//   field        v1          v2.0
+//   COL           0, 6        0, 6     unchanged
+//   ROW           6,17        6,17     unchanged
+//   BK           23, 4       23, 4     unchanged
+//   CH_MASK      27, 8       27, 8     unchanged
+//   T            35, 1       35, 1     unchanged
+//   OPSIZE       49,10       36,10
+//   OPCODE       59, 5       46, 5
+//   PU_MASK      78,16       51,16
+//   ROUTE(i)   96+5i, 5    67+5i, 5
+//   GB_MC       176,16      147,16     v1's bits 180..191 are v2's reserved zone
+//   GPR_ADDR2      --       163,17     new: the GPR side of WR_SBK / RD_SBK
+//
+// Positions are the RTL's, via hw/ch2/version2.0/pim_v2.0_ISR_주소맵.md §1, which
+// names src/front_end/emulator_controller/rtl/pim_isr_defs.vh as the authority.
+#define ISR_F_OPCODE    46, 5
+#define ISR_F_OPSIZE    36, 10
 #define ISR_F_T         35, 1
 #define ISR_F_CHMASK    27, 8
 #define ISR_F_BK        23, 4
 #define ISR_F_ROW        6, 17
 #define ISR_F_COL        0, 6
-#define ISR_F_PUMASK    78, 16
-#define ISR_F_GBMC     176, 16
-#define ISR_F_ROUTE(i) (96 + 5 * (i)), 5
+#define ISR_F_PUMASK    51, 16
+#define ISR_F_GBMC     147, 16
+#define ISR_F_GPRADDR2 163, 17
+#define ISR_F_ROUTE(i) (67 + 5 * (i)), 5
+
+// Everything above 179 must be zero.  The encoder asserts it rather than trusting
+// itself: a field written at a v1 offset lands here, and that is the one mistake
+// this repack makes easy.
+#define ISR_RESERVED_LO 180u
 
 struct emu_isr_spec {
     uint32_t opcode;

@@ -105,17 +105,8 @@ static void cfr_wr(uint32_t off, uint32_t v)
     *(volatile uint32_t *)(g_bar + EMU_OFF_CFR + off) = v;
     __sync_synchronize();
 }
-static uint32_t viol_rd(uint32_t off)
-{
-    __sync_synchronize();
-    // The violation CSR is PER CHANNEL (OFF_VIOL + ch*0x1000).  Reading channel
-    // 0's block while the kernel ran on channel 1 would report another channel's
-    // counters as this run's — a quiet way to call a bad run clean.
-    uint32_t v = *(volatile uint32_t *)
-        (g_bar + PIM_OFF_VIOL + (size_t)g_ch * 0x1000u + off);
-    __sync_synchronize();
-    return v;
-}
+// v2.0: CFR registers, channel as an address field (VIOL_BANK_BASE).
+#define viol_rd(off)  cfr_rd(off)
 
 // violation 카운터는 누적된다.  실행 전에 지우지 않으면 로그의 cnt/max 가 이번
 // 실행의 값이 아니라 마지막으로 지워진 이후의 합이 되어, 캡처한 파형 한 창과
@@ -131,14 +122,7 @@ static void viol_clear_all(void)
 
 // 실제로 쓴 채널만, 16 뱅크 전부 찍는다.  ANY 비트가 0인 뱅크도 값을 보여야
 // "위반 0 건" 과 "안 읽었음" 이 눈으로 구분된다.
-static uint32_t viol_rd_ch(unsigned ch, uint32_t off)
-{
-    __sync_synchronize();
-    uint32_t v = *(volatile uint32_t *)
-        (g_bar + PIM_OFF_VIOL + (size_t)ch * 0x1000u + off);
-    __sync_synchronize();
-    return v;
-}
+#define viol_rd_ch(ch, off)  cfr_rd(off)
 // 위반 표를 볼 때 "무슨 예산에서 나온 수치인가" 가 같이 있어야 해석이 된다.
 // 이 값들은 ./emu_timing --scale N --keep 이 걸어둔 것이고, 커널은 건드리지 않는다.
 static void timing_print_now(void)
@@ -146,11 +130,13 @@ static void timing_print_now(void)
     printf("    timing : faw=%u rrd=%u rcd=%u ccd=%u rtp=%u rp=%u wr=%u ras=%u\n",
            cfr_rd(CFR_T_FAW), cfr_rd(CFR_T_RRD), cfr_rd(CFR_T_RCD), cfr_rd(CFR_T_CCD),
            cfr_rd(CFR_T_RTP), cfr_rd(CFR_T_RP),  cfr_rd(CFR_T_WR),  cfr_rd(CFR_T_RAS));
+    printf("             mod=%u rpab=%u\n",
+           cfr_rd(CFR_T_MOD), cfr_rd(CFR_T_RP_AB));
 }
 
 static void viol_report_ch(unsigned ch)
 {
-    uint32_t any = viol_rd_ch(ch, VIOL_ANY);
+    uint32_t any = ((cfr_rd(VIOL_ANY_REG(ch)) >> VIOL_ANY_SHIFT(ch)) & 0xFFFFu);
     printf("\n  violation CSR ch%u ANY: 0x%04x%s\n", ch, any,
            any ? "" : "   (no violations — every row below should read 0)");
     timing_print_now();
@@ -158,18 +144,11 @@ static void viol_report_ch(unsigned ch)
     printf("         | cnt    max  | cnt    max  | cnt    max  | cnt    max  | cnt    max  |  cnt |\n");
     printf("    -----+-------------+-------------+-------------+-------------+-------------+------+\n");
     for (unsigned b = 0; b < EMU_NBANKS; b++) {
-        uint32_t ca = viol_rd_ch(ch, VIOL_BANK_BASE(b) + VIOL_CNT_A);
-        uint32_t ma = viol_rd_ch(ch, VIOL_BANK_BASE(b) + VIOL_MAX_A);
-        uint32_t cb = viol_rd_ch(ch, VIOL_BANK_BASE(b) + VIOL_CNT_B);
-        uint32_t mb = viol_rd_ch(ch, VIOL_BANK_BASE(b) + VIOL_MAX_B);
-        printf("    %4u | %3u    %3u  | %3u    %3u  | %3u    %3u  | %3u    %3u  | %3u    %3u  | %4u |%s\n",
-               b,
-               ca         & 0xffu, ma         & 0xffu,
-               (ca >>  8) & 0xffu, (ma >>  8) & 0xffu,
-               (ca >> 16) & 0xffu, (ma >> 16) & 0xffu,
-               (ca >> 24) & 0xffu, (ma >> 24) & 0xffu,
-               cb         & 0xffu, mb         & 0xffu,
-               (cb >>  8) & 0xffu,
+        uint32_t base = VIOL_BANK_BASE(ch, b);
+        uint32_t c = cfr_rd(base + VIOL_CNT), m = cfr_rd(base + VIOL_MAX);
+        printf("    %4u | %3u  %5u  | %3u  %5u  |%s\n", b,
+               VIOL_CNT_ACT(c), VIOL_MAX_ACT(m),
+               VIOL_CNT_PRE(c), VIOL_MAX_PRE(m),
                ((any >> b) & 1u) ? "  <-- ANY" : "");
     }
 }
@@ -406,7 +385,7 @@ int main(int argc, char **argv)
            (unsigned long long)((uint64_t)row * EMU_ROW_BYTES + (uint64_t)col * EMU_WORD_BYTES));
     printf("  operands  V[k] = 2.0 (feeder)   W[k] = k+1 (executor)   expect 2(k+1)\n\n");
 
-    uint32_t viol_before = viol_rd(VIOL_ANY);
+    uint32_t viol_before = ((cfr_rd(VIOL_ANY_REG(g_ch)) >> VIOL_ANY_SHIFT(g_ch)) & 0xFFFFu);
     viol_clear_all();   // 이번 실행분만 세도록
     unsigned groups = sweep ? EMU_NBANKS : 1, failed = 0;
 

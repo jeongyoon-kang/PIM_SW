@@ -258,46 +258,75 @@ int main(int argc, char **argv)
     // HANDOFF §2 measured RCD_RD overrun 3 at T_RCD=4 against an ideal memory, so
     // a run with the values this tool leaves behind MUST make ANY nonzero.
     struct { uint32_t off; const char *name; } V[] = {
-        { VIOL_ANY,                        "ANY   (0x404)" },
-        { VIOL_CTRL,                       "CTRL  (0x400, reads 0 by design)" },
-        { VIOL_BANK_BASE(0)  + VIOL_STICKY, "bank0 STICKY" },
-        { VIOL_BANK_BASE(0)  + VIOL_CNT_A,  "bank0 CNT_A" },
-        { VIOL_BANK_BASE(0)  + VIOL_MAX_A,  "bank0 MAX_A" },
-        { VIOL_BANK_BASE(15) + VIOL_STICKY, "bank15 STICKY" },
-        { VIOL_BANK_BASE(0)  + 0x14u,       "bank0 +0x14 (unmapped -> must read 0)" },
+        { VIOL_ANY0,                          "ANY0  (0x804) ch0|ch1" },
+        { VIOL_ANY1,                          "ANY1  (0x808) ch2|ch3" },
+        { VIOL_BANK_BASE(0, 0)  + VIOL_STICKY, "ch0 bank0  STICKY" },
+        { VIOL_BANK_BASE(0, 0)  + VIOL_CNT,    "ch0 bank0  CNT" },
+        { VIOL_BANK_BASE(0, 0)  + VIOL_MAX,    "ch0 bank0  MAX" },
+        { VIOL_BANK_BASE(0, 15) + VIOL_STICKY, "ch0 bank15 STICKY" },
+        { VIOL_BANK_BASE(0, 0)  + 0x0Cu,       "ch0 bank0  +0x0C (reserved -> 0)" },
     };
     const unsigned NV = sizeof V / sizeof V[0];
-    // ONE violation CSR PER CHANNEL, at OFF_VIOL + ch*0x1000.  How many there are
-    // comes from the conf and nothing else: this tool reads exactly nch blocks and
-    // never one more.  Reading past the last one would be a channel-count PROBE,
-    // and probing an address the image does not decode is not something a sanity
-    // check should do — the hardware gets a register for that in a later revision.
-    uint32_t vval[PIM_NCH][sizeof V / sizeof V[0]];
+    uint32_t vval[sizeof V / sizeof V[0]];
     int v_ones = 0;
-    unsigned ones_ch = 0;
-    for (unsigned ch = 0; ch < PIM_NCH; ch++) {
-        for (unsigned i = 0; i < NV; i++) {
-            __sync_synchronize();
-            vval[ch][i] = *(volatile uint32_t *)
-                (g_bar + PIM_OFF_VIOL + (size_t)ch * 0x1000u + V[i].off);
-            __sync_synchronize();
-            if (vval[ch][i] == 0xffffffffu) { v_ones++; ones_ch = ch; }
-        }
+    for (unsigned i = 0; i < NV; i++) {
+        vval[i] = rd(V[i].off);
+        if (vval[i] == 0xffffffffu) v_ones++;
     }
     if (v_ones) {
-        printf("UNHEALTHY: violation CSR ch%u (+0x%06" PRIx64 ") reads all-ones on "
-               "%d/%u probes.\n", ones_ch,
-               (uint64_t)(PIM_OFF_VIOL + (uint64_t)ones_ch * 0x1000u), v_ones, NV * PIM_NCH);
-        for (unsigned ch = 0; ch < PIM_NCH; ch++)
-            for (unsigned i = 0; i < NV; i++)
-                printf("  ch%u %-34s 0x%08x%s\n", ch, V[i].name, vval[ch][i],
-                       vval[ch][i] == 0xffffffffu ? "   <--" : "");
-        printf("\n  All-ones is an undecoded address on this board, not a full register.\n"
-               "  Either BAR%u is not the control plane, or this image does not have\n"
-               "  %u channels — check that platform/active matches the PDI on the board.\n",
-               bar, PIM_NCH);
+        printf("UNHEALTHY: the CFR reads all-ones on %d/%u violation probes.\n",
+               v_ones, NV);
+        for (unsigned i = 0; i < NV; i++)
+            printf("  %-38s 0x%08x%s\n", V[i].name, vval[i],
+                   vval[i] == 0xffffffffu ? "   <--" : "");
+        printf("\n  All-ones is an undecoded address on this board, so either BAR%u is\n"
+               "  not the control plane, or the CFR window moved.\n", bar);
         munmap(m, span); close(fd);
         return 1;
+    }
+
+    // ---- IS THIS ACTUALLY A v2 IMAGE? --------------------------------------
+    //
+    // IT MATTERS MORE THAN ANY OTHER CHECK HERE, because crossing a v2 build with
+    // a v1 image does not fail -- it rings the doorbell.  v1's dispatcher decoded
+    // only addr[7:0], so its CFR aliased every 256 B, and v2's VIOL_CTRL at 0x800
+    // lands on v1's CTRL, whose bit 0 IS the doorbell.  A "clear the statistics"
+    // would start whatever program IMEM happens to hold.
+    //
+    // The discriminator is that aliasing itself.  PROG_LEN is a plain RW register
+    // at 0x028 on both; on v1 it reads back identically at 0x128 because the low
+    // byte is all that is decoded, and on v2 0x128 is reserved and reads 0.
+    // Written and restored, on a board this tool has already required to be idle.
+    {
+        const uint32_t MARK = 0x2A5Au;          /* fits PROG_LEN's 14 bits */
+        uint32_t keep = rd(CFR_PROG_LEN), direct, alias;
+
+        wr(CFR_PROG_LEN, MARK);
+        direct = rd(CFR_PROG_LEN);
+        alias  = rd(CFR_PROG_LEN + 0x100u);
+        wr(CFR_PROG_LEN, keep);
+
+        if (direct != MARK) {
+            printf("UNHEALTHY: PROG_LEN did not hold a written value (wrote 0x%04x, "
+                   "read 0x%08x).\n  The CFR is mapped but not writable -- this is "
+                   "not the dispatcher.\n", MARK, direct);
+            munmap(m, span); close(fd);
+            return 1;
+        }
+        if (alias == MARK) {
+            printf("UNHEALTHY: the CFR still aliases every 256 B -- 0x%03x reads back "
+                   "what 0x%03x was given.\n"
+                   "  THIS IS A v1 IMAGE AND THIS IS A v2 BUILD.  Do not run anything:\n"
+                   "  v2 clears the violation statistics by writing 0x800, which on a v1\n"
+                   "  image aliases to CTRL -- and CTRL[0] is the doorbell.\n"
+                   "  Program hw/ch2/version2.0, or check out the v1 branch.\n",
+                   CFR_PROG_LEN + 0x100u, CFR_PROG_LEN);
+            munmap(m, span); close(fd);
+            return 1;
+        }
+        printf("  CFR decodes past 8 bits (0x%03x reads 0x%08x, not the 0x%04x at "
+               "0x%03x) — a v2 image\n",
+               CFR_PROG_LEN + 0x100u, alias, MARK, CFR_PROG_LEN);
     }
 
     // ---- the channel address map ------------------------------------------
@@ -389,14 +418,9 @@ int main(int argc, char **argv)
                status, (status & CFR_STATUS_DONE) ? 1u : 0u,
                CFR_STATUS_STATE(status), prog_len);
 
-        for (unsigned ch = 0; ch < PIM_NCH; ch++) {
-            printf("\n  violation CSR ch%u at +0x%06" PRIx64 " (AXI 0x%011" PRIx64
-                   "), read-only:\n",
-                   ch, (uint64_t)(PIM_OFF_VIOL + (uint64_t)ch * 0x1000u),
-                   pim_viol_axi(ch));
-            for (unsigned i = 0; i < NV; i++)
-                printf("    %-38s 0x%08x\n", V[i].name, vval[ch][i]);
-        }
+        printf("\n  violation statistics, inside the CFR at +0x400, read-only:\n");
+        for (unsigned i = 0; i < NV; i++)
+            printf("    %-38s 0x%08x\n", V[i].name, vval[i]);
         printf("    ZERO IS THE CORRECT READING HERE.  Everything resets to 0\n"
                "    (emu_viol_csr.v:283-292) and an offset the block does not decode\n"
                "    also reads 0 (emu_viol_csr.v:47).  What would be wrong is\n"
