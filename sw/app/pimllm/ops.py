@@ -27,6 +27,8 @@ nothing.  Callers pass something contiguous; this says so when they do not.
 """
 from __future__ import annotations
 
+import time
+
 import torch
 
 import _pim
@@ -36,6 +38,39 @@ RED_MAJOR = _pim.RED_MAJOR
 ACC_SINGLE = _pim.ACC_SINGLE
 ACC_DUAL = _pim.ACC_DUAL
 ALLOC_ZERO = _pim.ALLOC_ZERO
+
+# Open a torch profiler range around every launch when something is profiling.
+# OFF BY DEFAULT because record_function is about a microsecond and attention makes
+# hundreds of calls a token; pimllm.profile turns it on for the region it watches.
+# What it buys is that a chrome trace shows the card's ranges beside RMSNorm and
+# softmax, on one timeline, instead of a gap where the PIM work was.
+TRACE = False
+
+# Set by pimllm.profile to a callable(name, t0, t1).  It is what turns a launch into
+# a slice on a timeline, and it is a hook rather than an import so that ops.py does
+# not depend on the profiler it feeds.
+SINK = None
+
+
+class _range:
+    __slots__ = ("name", "r", "t0")
+
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        self.t0 = time.perf_counter() if SINK is not None else 0.0
+        self.r = torch.profiler.record_function(self.name) if TRACE else None
+        if self.r is not None:
+            self.r.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        if self.r is not None:
+            self.r.__exit__(*exc)
+        if SINK is not None:
+            SINK(self.name, self.t0, time.perf_counter())
+        return False
 
 
 def _ptr(t: torch.Tensor, what: str) -> tuple[int, int]:
@@ -124,10 +159,17 @@ class Runtime:
     threads, the same way pim_ctx is not shared."""
 
     def __init__(self, max_red: int, max_out_groups: int,
-                 allow_t_latch: bool = False):
+                 allow_t_latch: bool = False, max_batch: int = 1,
+                 vec_bytes: int = 0, res_bytes: int = 0):
         # The DRAM timing registers are NOT set here.  hwdef/test/emu_timing owns
         # them; opening an engine reads them and refuses on T_CCD < 2.
-        self._r = _pim.Runtime(max_red, max_out_groups, allow_t_latch)
+        #
+        # vec_bytes/res_bytes are the GPR a stacked program may spend on its
+        # pieces.  Left at 0 they are derived from max_red, which reserves the FFN's
+        # 16 KiB for an attention query of 128 B — see include/pimrt/pim_op.h.
+        self._r = _pim.Runtime(max_red, max_out_groups, allow_t_latch, max_batch,
+                               vec_bytes, res_bytes)
+        self.max_batch = max_batch
         g = _pim.geometry()
         self.nch, self.nbank = g["nch"], g["nbank"]
         self.per_group = self.nch * self.nbank
@@ -151,9 +193,26 @@ class Runtime:
             out = torch.empty(want, dtype=torch.bfloat16)
         vp, vn = _ptr(v, "vector")
         yp, yn = _ptr(out, "output")
-        self._r.matvec(m._t, out_first, out_count, red_off, red_len, vp, vn, yp, yn,
-                       mode)
+        with _range(f"pim::matvec[{out_count}g x {red_len}]"):
+            self._r.matvec(m._t, out_first, out_count, red_off, red_len, vp, vn,
+                           yp, yn, mode)
         return out
+
+    # ---- stacking ----------------------------------------------------------
+    # One doorbell for several matvecs.  A launch costs an IMEM transfer, two MMIO
+    # writes and a poll loop whatever is behind it, and attention pays that per
+    # HEAD — 32 times a layer for programs of eleven instructions.
+    #
+    # EVERY `out` MUST STAY ALIVE UNTIL submit(), because that is when the card's
+    # answer is written into it.  batch() keeps the references so a caller cannot
+    # lose one to the garbage collector mid-program.
+    def batch(self, mode: int = ACC_SINGLE) -> "Batch":
+        return Batch(self, mode)
+
+    def outputs(self, out_count: int) -> int:
+        """How many BF16 a matvec over `out_count` supergroups writes — the padding
+        outputs of the last one included, because the hardware writes them."""
+        return self._r.outputs(out_count)
 
     def stats(self) -> dict:
         return self._r.stats()
@@ -164,3 +223,50 @@ class Runtime:
 
 def geometry() -> dict:
     return _pim.geometry()
+
+
+class Batch:
+    """Several matvecs behind one doorbell.
+
+        with rt.batch() as b:
+            for h in range(32):
+                ys.append(b.add(K, q[h], red_off=h*D, red_len=D, out_count=n))
+        # every ys[h] is filled once the block exits
+
+    The results are not there until the block exits.  Reading one inside is not an
+    error anywhere — it is whatever the buffer held — so the shape of the API is the
+    warning.
+    """
+
+    def __init__(self, rt: Runtime, mode: int):
+        self.rt, self.mode = rt, mode
+        self._keep: list[torch.Tensor] = []
+
+    def __enter__(self):
+        self.rt._r.begin(self.mode)
+        return self
+
+    def add(self, m: Tensor, v: torch.Tensor, *, out_first: int = 0,
+            out_count: int | None = None, red_off: int = 0,
+            red_len: int | None = None,
+            out: torch.Tensor | None = None) -> torch.Tensor:
+        if out_count is None:
+            out_count = m.ngroups - out_first
+        if red_len is None:
+            red_len = v.numel()
+        if out is None:
+            out = torch.empty(self.rt._r.outputs(out_count), dtype=torch.bfloat16)
+        vp, vn = _ptr(v, "vector")
+        yp, yn = _ptr(out, "output")
+        with _range(f"pim::add[{out_count}g x {red_len}]"):
+            self.rt._r.add(m._t, out_first, out_count, red_off, red_len,
+                           vp, vn, yp, yn)
+        self._keep.append(out)          # alive until submit writes it
+        return out
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            with _range(f"pim::submit[{len(self._keep)} pieces]"):
+                self.rt._r.submit()
+        self._keep.clear()
+        return False

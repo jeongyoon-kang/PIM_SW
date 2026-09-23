@@ -81,7 +81,8 @@ int main(void)
     printf("pim_op_matvec: linear, Q.K^T and S.V through one call\n");
     if ((bad = pim_open(NULL, &c))) { printf("SKIPPED: %s\n", bad); return 0; }
     {
-        pim_rt_config cfg = { .max_red = 4096, .max_out_groups = 128 };
+        pim_rt_config cfg = { .max_red = 4096, .max_out_groups = 128,
+                              .max_batch = 8 };
         if ((bad = pim_rt_open(c, &cfg, &rt))) {
             printf("SKIPPED: %s\n", bad); pim_close(c); return 0;
         }
@@ -211,7 +212,71 @@ int main(void)
         free(Vh); free(S); free(y); free(golden); free(col);
     }
 
-    // ---- 4. what it refuses ------------------------------------------------
+    // ---- 4. stacking: same answer, fewer doorbells -------------------------
+    //
+    // A doorbell costs an IMEM transfer, two MMIO writes and a poll loop, and that
+    // is the same whether eleven instructions sit behind it or eleven thousand.
+    // Attention pays it per HEAD.  Stacking changes not one MAC — so the two
+    // answers below must be BIT-IDENTICAL, and anything else means the pieces are
+    // interfering through the GPR or the accumulators.
+    printf("\n  4. stacking 8 heads into one program\n");
+    {
+        pim_tensor K;
+        uint32_t   kvw = H_KV * D;
+        uint32_t   ngroup = (S_KV + per - 1) / per;
+        uint32_t   nout_pad = pim_op_outputs(rt, ngroup);
+        uint16_t  *Kh = malloc((size_t)S_KV * kvw * 2);
+        uint16_t  *q  = malloc((size_t)H_KV * D * 2);
+        uint16_t  *one = malloc((size_t)H_KV * nout_pad * 2);
+        uint16_t  *bat = malloc((size_t)H_KV * nout_pad * 2);
+        pim_rt_stat s0, s1, s2;
+        uint32_t    nbad = 0;
+
+        for (size_t i = 0; i < (size_t)S_KV * kvw; i++) Kh[i] = rnd_bf16();
+        for (size_t i = 0; i < (size_t)H_KV * D; i++)   q[i]  = rnd_bf16();
+
+        CHECK(!(bad = pim_tensor_alloc(c, PIM_LAYOUT_OUT_MAJOR, S_MAX, kvw, 0, &K)),
+              "alloc: %s", bad ? bad : "");
+        CHECK(!(bad = pim_tensor_append(c, &K, 0, S_KV, Kh)), "append: %s",
+              bad ? bad : "");
+
+        // (a) one doorbell per head, which is what attention.py does today
+        pim_rt_stat_get(rt, &s0);
+        for (uint32_t h = 0; h < H_KV; h++)
+            CHECK(!(bad = pim_op_matvec(rt, &K, 0, ngroup, h * D, D,
+                                        q + h * D, one + h * nout_pad,
+                                        PIM_ACC_SINGLE)), "unstacked h=%u: %s", h,
+                  bad ? bad : "");
+        pim_rt_stat_get(rt, &s1);
+
+        // (b) all eight in one
+        CHECK(!(bad = pim_op_begin(rt, PIM_ACC_SINGLE)), "begin: %s", bad ? bad : "");
+        for (uint32_t h = 0; h < H_KV; h++)
+            CHECK(!(bad = pim_op_add(rt, &K, 0, ngroup, h * D, D,
+                                     q + h * D, bat + h * nout_pad)),
+                  "add h=%u: %s", h, bad ? bad : "");
+        CHECK(!(bad = pim_op_submit(rt)), "submit: %s", bad ? bad : "");
+        pim_rt_stat_get(rt, &s2);
+
+        for (uint32_t h = 0; h < H_KV; h++)
+            for (uint32_t i = 0; i < S_KV; i++)
+                if (one[h * nout_pad + i] != bat[h * nout_pad + i]) nbad++;
+        CHECK(nbad == 0, "%u of %u outputs differ between stacked and unstacked",
+              nbad, H_KV * S_KV);
+
+        printf("     unstacked   %u launches, %u ISAs, %llu us\n",
+               s1.nlaunch - s0.nlaunch, s1.nisr - s0.nisr,
+               (unsigned long long)(s1.launch_us - s0.launch_us));
+        printf("     stacked     %u launches, %u ISAs, %llu us\n",
+               s2.nlaunch - s1.nlaunch, s2.nisr - s1.nisr,
+               (unsigned long long)(s2.launch_us - s1.launch_us));
+        printf("     %u/%u outputs bit-identical\n", H_KV * S_KV - nbad, H_KV * S_KV);
+
+        pim_tensor_free(c, &K);
+        free(Kh); free(q); free(one); free(bat);
+    }
+
+    // ---- 5. what it refuses ------------------------------------------------
     printf("\n  4. refusals\n");
     {
         pim_tensor W;

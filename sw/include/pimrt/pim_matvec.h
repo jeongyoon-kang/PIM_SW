@@ -105,6 +105,31 @@ const char *pim_matvec_logical(const pim_geometry *g, const pim_tensor *m,
                                const void *ygpr, size_t ybytes,
                                pim_acc_mode mode, pim_logical *out);
 
+/* THE SAME THING WITHOUT THE EOS, so several of these can be stacked into one
+ * program.  The caller appends the EOS once at the end.
+ *
+ * WHY THAT IS WORTH A SEPARATE ENTRY POINT.  A doorbell costs the same whether the
+ * program behind it is eleven instructions or eleven thousand — IMEM transfer, two
+ * MMIO writes, and a poll loop.  Attention pays that per HEAD, which is 32 times a
+ * layer for a shape whose real work is one MAC per token group.  Stacking the heads
+ * into one program does not change a single MAC; it changes how many times that
+ * fixed cost is paid.
+ *
+ * WHAT THE CALLER MUST GET RIGHT.  Each stacked piece needs its OWN vector words and
+ * its OWN result words — they coexist in the GPR for the whole launch, where a
+ * single-piece program could reuse one buffer.  And the accumulators are per piece:
+ * pim_logical_atom is already emitted per pass inside, so lowering will not cut a
+ * piece apart, but two pieces must not interleave. */
+/* The EOS a stacked program needs exactly one of, at the end. */
+const char *pim_matvec_eos(const pim_geometry *g, pim_logical *out);
+
+const char *pim_matvec_logical_part(const pim_geometry *g, const pim_tensor *m,
+                                    uint32_t out_first, uint32_t out_count,
+                                    uint32_t red_off, uint32_t red_len,
+                                    const void *vgpr, size_t vbytes, uint64_t vtag,
+                                    const void *ygpr, size_t ybytes,
+                                    pim_acc_mode mode, pim_logical *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -31,37 +31,7 @@ import math
 import torch
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from . import ops
-
-
-def _scores(rt: ops.Runtime, layer, q: torch.Tensor, kv_head: int,
-            n_kv: int) -> torch.Tensor:
-    """q · K[0..n_kv) for one head, as BF16 on the host."""
-    d = layer.head_dim
-    ngroup = (n_kv + rt.per_group - 1) // rt.per_group
-    y = rt.matvec(layer.k, q, out_count=ngroup, red_off=kv_head * d, red_len=d)
-    return y[:n_kv]
-
-
-def _weighted_v(rt: ops.Runtime, layer, s: torch.Tensor, kv_head: int,
-                n_kv: int) -> torch.Tensor:
-    """s · V[0..n_kv) for one head.
-
-    ONLY THIS HEAD'S OUTPUTS ARE COMPUTED.  V's output axis is H_kv*D wide, and
-    asking for all of it would do H_kv times the work and throw away all but one
-    head's slice.  out_first/out_count name the supergroups covering
-    [kv_head*D, (kv_head+1)*D), which needs D to be a multiple of nch*nbank — 64 and
-    128 both are on a 2-channel image."""
-    d = layer.head_dim
-    per = rt.per_group
-    if d % per:
-        raise NotImplementedError(
-            f"head_dim {d} is not a multiple of {per} outputs per supergroup, so a "
-            f"head's slice of V does not land on supergroup boundaries"
-        )
-    y = rt.matvec(layer.v, s, out_first=kv_head * d // per, out_count=d // per,
-                  red_len=n_kv)
-    return y[:d]
+from . import ops, profile
 
 
 def pim_attention_forward(module, query: torch.Tensor, key, value,
@@ -70,8 +40,17 @@ def pim_attention_forward(module, query: torch.Tensor, key, value,
     """`key` and `value` are the PimLayer handle `PimLayer.update` returned.
 
     Returns `[B, S_q, H_q, D]`, which is what `LlamaAttention.forward` reshapes and
-    feeds to o_proj — see `eager_attention_forward`, which transposes back the same
-    way just before returning.
+    feeds to o_proj.
+
+    THE HEADS SHARE TWO DOORBELLS, not sixty-four.  Every head's Q.Kᵀ is an
+    independent program of about a dozen instructions, and a doorbell costs an IMEM
+    transfer, two MMIO writes and a poll loop whatever is behind it.  So all of them
+    go into one program, the softmax happens on the host once they are all back, and
+    all the S.V go into a second.  Not one MAC changes.
+
+    THE SOFTMAX IS WHY IT IS TWO AND NOT ONE.  S.V needs the scores, and the card has
+    no exp and no max — that host round trip is the one thing in attention no
+    rearrangement removes.
     """
     layer = key
     if not hasattr(layer, "k"):
@@ -87,35 +66,60 @@ def pim_attention_forward(module, query: torch.Tensor, key, value,
 
     n_kv = layer.cumulative                      # includes the tokens just appended
     group = h_q // layer.n_kv_heads              # GQA: query heads per KV head
-    out = torch.empty(b, s_q, h_q, d, dtype=query.dtype)
+    per = rt.per_group
+    if d % per:
+        raise NotImplementedError(
+            f"head_dim {d} is not a multiple of {per} outputs per supergroup, so a "
+            f"head's slice of V does not land on supergroup boundaries"
+        )
+    ngroup = (n_kv + per - 1) // per
+    wide = rt.outputs(ngroup)                    # padding outputs included
+    first_q = n_kv - s_q                         # absolute position of query 0
 
-    # The absolute position of query i, so the causal mask can be applied without
-    # consulting `attention_mask` — which is built for a padded [S_q, S_kv] and would
-    # have to be sliced to the same thing.
-    first_q = n_kv - s_q
+    # ---- 1. every position's, every head's q . K ---------------------------
+    #
+    # ONE BATCH FOR THE WHOLE LAYER.  The launches split where IMEM says so and
+    # nowhere else; whether that is one doorbell or forty is the runtime's business
+    # and not this function's, which is the whole point of writing it this way.
+    raw = torch.empty(s_q * h_q, wide, dtype=query.dtype)
+    with profile.span("attn q.K"), rt.batch() as bat:
+        for i in range(s_q):
+            for h in range(h_q):
+                bat.add(layer.k, query[0, h, i].contiguous(), out_count=ngroup,
+                        red_off=(h // group) * d, red_len=d,
+                        out=raw[i * h_q + h])
 
-    for i in range(s_q):
-        valid = first_q + i + 1                  # keys 0 .. first_q+i are visible
-        for h in range(h_q):
-            kv_head = h // group
-            q = query[0, h, i].contiguous()
+    # ---- 2. mask and softmax, on the host, ALL OF IT AT ONCE ---------------
+    #
+    # One softmax over [S_q*H_q, S_kv] instead of one per head per position.  At a
+    # 512-token prompt that is 1 call where the loop made 16384, and they were small
+    # enough that the per-call overhead was most of them.
+    with profile.span("attn softmax (host)"):
+        sc = raw[:, :n_kv].float().reshape(s_q, h_q, n_kv) * scaling
+        # CAUSAL MASK, built once.  Position i may see keys 0 .. first_q+i.
+        pos = torch.arange(n_kv)
+        allow = pos[None, :] <= (first_q + torch.arange(s_q))[:, None]
+        sc = sc.masked_fill(~allow[:, None, :], float("-inf"))
+        if attention_mask is not None:
+            sc = sc + attention_mask[0, 0, :s_q, :n_kv].float()[:, None, :]
+        probs = torch.softmax(sc, dim=-1).to(query.dtype).reshape(s_q * h_q, n_kv)
+        probs = probs.contiguous()
 
-            sc = _scores(rt, layer, q, kv_head, n_kv).float() * scaling
-            if valid < n_kv:                     # prefill; decode has valid == n_kv
-                sc[valid:] = float("-inf")
-            if attention_mask is not None:
-                # Whatever else the model wants masked — padding, a sliding window.
-                # Sliced to the keys that exist, since our cache reports its real
-                # length rather than the reserved one.
-                sc = sc + attention_mask[0, 0, i, :n_kv].float()
-            sc = torch.softmax(sc, dim=-1).to(query.dtype).contiguous()
-
-            out[0, i, h] = _weighted_v(rt, layer, sc, kv_head, n_kv)
+    # ---- 3. every position's, every head's s . V ---------------------------
+    #
+    # ONLY THIS HEAD'S OUTPUTS.  V's output axis is H_kv*D wide; asking for all of
+    # it would do H_kv times the work and discard all but one head's slice.
+    got = torch.empty(s_q * h_q, rt.outputs(d // per), dtype=query.dtype)
+    with profile.span("attn s.V"), rt.batch() as bat:
+        for i in range(s_q):
+            for h in range(h_q):
+                bat.add(layer.v, probs[i * h_q + h],
+                        out_first=(h // group) * d // per, out_count=d // per,
+                        red_len=n_kv, out=got[i * h_q + h])
 
     # attn_weights is None: returning them would mean keeping an [S_q, S_kv] per head
-    # that nothing asked for.  output_attentions=True is unsupported and says so
-    # through the None rather than by inventing a tensor.
-    return out, None
+    # that nothing asked for.
+    return got[:, :d].reshape(1, s_q, h_q, d), None
 
 
 def register(name: str = "pim") -> None:

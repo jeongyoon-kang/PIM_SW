@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 from transformers import TextStreamer
 
-from . import attention, ops
+from . import attention, ops, profile
 from .budget import ModelShape, plan
 from .cache import PimCache
 from .device import Geometry
@@ -93,6 +93,10 @@ class PimLinear(nn.Module):
         super().__init__()
         self.rt = rt
         self.name = name
+        # PROFILED BY KIND, NOT BY LAYER.  All 16 q_proj are the same shape and the
+        # same program; keeping them apart would be 113 rows saying one thing each.
+        # lm_head and down_proj are different shapes and DO need their own rows.
+        self._span = "linear " + (name.rsplit(".", 1)[-1] or "?")
         self.out_features, self.in_features = weight.shape
         self.w = ops.Tensor.from_weight(weight.contiguous())
         # A bias is [out_features] and elementwise; there is no MAC for it and no
@@ -106,9 +110,10 @@ class PimLinear(nn.Module):
         shape = x.shape[:-1]
         flat = x.reshape(-1, self.in_features)
         out = torch.empty(flat.shape[0], self.out_features, dtype=x.dtype)
-        for i in range(flat.shape[0]):
-            y = self.rt.matvec(self.w, flat[i].contiguous())
-            out[i] = y[:self.out_features]
+        with profile.span(self._span):
+            for i in range(flat.shape[0]):
+                y = self.rt.matvec(self.w, flat[i].contiguous())
+                out[i] = y[:self.out_features]
         if self.bias is not None:
             out = out + self.bias
         return out.reshape(*shape, self.out_features)
@@ -180,9 +185,21 @@ class PimModel:
         # the sequence when S·V reduces over it.  max_out_groups is the widest
         # output, which is lm_head's vocabulary.
         per = geometry.outputs_per_group
+        # ATTENTION STACKS A WHOLE LAYER, not a whole position: every query
+        # position of every head goes into one program and the runtime splits it
+        # where IMEM says so.  For a 512-token prompt that is 16384 pieces, so
+        # max_batch is a ceiling on the piece ARRAY and the GPR budgets below are
+        # what actually decide how many share a doorbell.
+        #
+        # WHY THE BUDGETS ARE EXPLICIT.  Derived from max_red they would reserve
+        # the FFN's 16 KiB for each piece, and an attention query is 128 B — 4 MiB
+        # of GPR would hold 256 pieces instead of thousands.
         self.rt = ops.Runtime(
             max_red=max(self.shape.hidden, self.shape.intermediate, s_max),
             max_out_groups=(self.shape.vocab + per - 1) // per,
+            max_batch=4096,
+            vec_bytes=1 << 20,
+            res_bytes=5 << 19,          # 2.5 MiB; GPR is 4 MiB in total
         )
 
         attention.register("pim")

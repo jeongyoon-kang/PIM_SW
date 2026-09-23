@@ -109,12 +109,16 @@ struct Tensor {
 struct Runtime {
     pim_rt *rt = nullptr;
 
-    Runtime(uint32_t max_red, uint32_t max_out_groups, bool allow_t)
+    Runtime(uint32_t max_red, uint32_t max_out_groups, bool allow_t,
+            uint32_t max_batch, size_t vec_bytes, size_t res_bytes)
     {
         pim_rt_config cfg{};
         cfg.max_red = max_red;
         cfg.max_out_groups = max_out_groups;
         cfg.allow_t_latch = allow_t;
+        cfg.max_batch = max_batch;
+        cfg.vec_bytes = vec_bytes;
+        cfg.res_bytes = res_bytes;
         ck(pim_rt_open(ctx(), &cfg, &rt));
     }
     ~Runtime() { if (rt) pim_rt_close(rt); }
@@ -144,6 +148,34 @@ struct Runtime {
                          (const uint16_t *)v, (uint16_t *)y, (pim_acc_mode)mode));
     }
 
+    // Stacking.  The caller keeps every `y` alive until submit, which is when they
+    // are written; Python holds the references for exactly that reason.
+    void begin(int mode) { ck(pim_op_begin(rt, (pim_acc_mode)mode)); }
+
+    void add(Tensor &m, uint32_t out_first, uint32_t out_count,
+             uint32_t red_off, uint32_t red_len,
+             uintptr_t v, size_t vn, uintptr_t y, size_t yn)
+    {
+        m.check();
+        if (vn != red_len)
+            throw std::runtime_error("add: vector has " + std::to_string(vn)
+                                     + " elements, red_len is " + std::to_string(red_len));
+        size_t want = pim_op_outputs(rt, out_count);
+        if (yn < want)
+            throw std::runtime_error("add: output buffer holds " + std::to_string(yn)
+                                     + " but " + std::to_string(out_count)
+                                     + " supergroups write " + std::to_string(want));
+        py::gil_scoped_release nogil;
+        ck(pim_op_add(rt, &m.t, out_first, out_count, red_off, red_len,
+                      (const uint16_t *)v, (uint16_t *)y));
+    }
+
+    void submit()
+    {
+        py::gil_scoped_release nogil;
+        ck(pim_op_submit(rt));
+    }
+
     py::dict stats() const
     {
         pim_rt_stat s{};
@@ -155,6 +187,16 @@ struct Runtime {
         d["nisr"] = s.nisr;
         d["nwrvec"] = s.nwrvec;
         d["nop"] = s.nop;
+        // The disjoint phases.  Summed they are the time inside pim_op_*, so a
+        // caller can subtract them from a wall-clock range and be left with what
+        // Python itself cost.
+        d["pad_us"] = s.pad_us;
+        d["vup_us"] = s.vup_us;
+        d["gen_us"] = s.gen_us;
+        d["low_us"] = s.low_us;
+        d["run_us"] = s.run_us;
+        d["back_us"] = s.back_us;
+        d["unpack_us"] = s.unpack_us;
         return d;
     }
     void stats_reset() { pim_rt_stat_reset(rt); }
@@ -209,9 +251,16 @@ PYBIND11_MODULE(_pim, m)
         });
 
     py::class_<Runtime>(m, "Runtime")
-        .def(py::init<uint32_t, uint32_t, bool>(),
+        .def(py::init<uint32_t, uint32_t, bool, uint32_t, size_t, size_t>(),
              py::arg("max_red"), py::arg("max_out_groups"),
-             py::arg("allow_t_latch") = false)
+             py::arg("allow_t_latch") = false, py::arg("max_batch") = 1,
+             py::arg("vec_bytes") = 0, py::arg("res_bytes") = 0)
+        .def("begin", &Runtime::begin, py::arg("mode") = (int)PIM_ACC_SINGLE)
+        .def("add", &Runtime::add,
+             py::arg("m"), py::arg("out_first"), py::arg("out_count"),
+             py::arg("red_off"), py::arg("red_len"),
+             py::arg("v"), py::arg("vn"), py::arg("y"), py::arg("yn"))
+        .def("submit", &Runtime::submit)
         .def("matvec", &Runtime::matvec,
              py::arg("m"), py::arg("out_first"), py::arg("out_count"),
              py::arg("red_off"), py::arg("red_len"),

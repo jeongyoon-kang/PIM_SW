@@ -147,6 +147,30 @@ const char *pim_matvec_logical(const pim_geometry *g, const pim_tensor *m,
                                const void *ygpr, size_t ybytes,
                                pim_acc_mode mode, pim_logical *out)
 {
+    const char *bad = pim_matvec_logical_part(g, m, out_first, out_count, red_off,
+                                              red_len, vgpr, vbytes, vtag,
+                                              ygpr, ybytes, mode, out);
+    if (bad) return bad;
+    return pim_matvec_eos(g, out);
+}
+
+const char *pim_matvec_eos(const pim_geometry *g, pim_logical *out)
+{
+    struct emu_isr_spec s = emu_isr_default_ch(ISR_OP_EOS, (1u << g->nch) - 1u);
+    struct emu_isr      isr;
+    const char *bad;
+
+    if ((bad = emu_isr_build(&isr, &s))) return bad;
+    return pim_logical_push(out, (const pim_isr *)&isr);
+}
+
+const char *pim_matvec_logical_part(const pim_geometry *g, const pim_tensor *m,
+                               uint32_t out_first, uint32_t out_count,
+                               uint32_t red_off, uint32_t red_len,
+                               const void *vgpr, size_t vbytes, uint64_t vtag,
+                               const void *ygpr, size_t ybytes,
+                               pim_acc_mode mode, pim_logical *out)
+{
     uint32_t all_ch = (1u << g->nch) - 1u;
     uint32_t nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
     uint32_t nck, hi;
@@ -261,11 +285,5 @@ const char *pim_matvec_logical(const pim_geometry *g, const pim_tensor *m,
         if ((bad = pim_logical_atom(out, first, out->nisr - 1))) return bad;
     }
 
-    {
-        struct emu_isr_spec s = emu_isr_default_ch(ISR_OP_EOS, all_ch);
-        struct emu_isr      isr;
-        if ((bad = emu_isr_build(&isr, &s))) return bad;
-        if ((bad = pim_logical_push(out, (const pim_isr *)&isr))) return bad;
-    }
     return NULL;
 }

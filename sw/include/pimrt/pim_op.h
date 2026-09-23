@@ -56,6 +56,34 @@ typedef struct {
 	uint32_t max_red;          /* elements on the reduction axis          */
 	uint32_t max_out_groups;   /* supergroups of outputs in ONE op        */
 
+	/* HOW MANY PIECES MAY BE STACKED INTO ONE PROGRAM.  1 keeps the old
+	 * behaviour: every op is its own doorbell.
+	 *
+	 * A DOORBELL COSTS THE SAME WHATEVER IS BEHIND IT — an IMEM transfer, two MMIO
+	 * writes and a poll loop — so a kernel whose real work is a handful of MACs
+	 * pays the same fixed cost as one with eleven thousand.  Attention pays it per
+	 * HEAD: 32 launches a layer for programs of eleven instructions each.  Stacking
+	 * them changes not one MAC, only how often that fixed cost is paid.
+	 *
+	 * What it costs is GPR: every stacked piece needs its own vector words and its
+	 * own result words, live at the same time, where a single-piece program reuses
+	 * one buffer.  Sized at open from this number. */
+	uint32_t max_batch;
+
+	/* GPR RESERVED FOR THE STACKED PIECES, vectors and results.  0 means "derive
+	 * them from max_red and max_batch", which is right for a caller stacking a few
+	 * large pieces.
+	 *
+	 * A CALLER STACKING THOUSANDS OF SMALL ONES MUST SET THESE.  Attention over a
+	 * whole prompt is S_q * H_q pieces whose vectors are a HEAD wide — 128 B — and
+	 * deriving the buffer from max_red would reserve the FFN's 16 KiB for each of
+	 * them, 128 times what they use.  The allocator underneath is a bump pointer
+	 * and already packs pieces at their true size; this is only how much room it
+	 * has.  Both are raised to fit one largest piece, so neither can be set so
+	 * small that an op is impossible. */
+	size_t vec_bytes;
+	size_t res_bytes;
+
 	/* Evidence that this image decodes ISR[35], which PIM_ACC_DUAL needs.  Passed
 	 * to lowering as PIM_LOWER_ALLOW_T; without it a DUAL op is refused early
 	 * rather than producing a silently wrong number at the doorbell. */
@@ -72,14 +100,34 @@ void        pim_rt_close(pim_rt *r);
 pim_exec   *pim_rt_exec (pim_rt *r);
 pim_ctx    *pim_rt_ctx  (pim_rt *r);
 
-/* Statistics for the last op, or cumulative since pim_rt_stat_reset(). */
+/* Statistics for the last op, or cumulative since pim_rt_stat_reset().
+ *
+ * WHY THE PHASE BREAKDOWN IS HERE AND NOT IN A PROFILER.  A host profiler sees one
+ * call — pim_op_matvec — and can say only that it took four milliseconds.  Whether
+ * those were spent generating instructions, moving a vector over PCIe, or waiting
+ * on a bank is invisible from outside, and those three have nothing in common: one
+ * is fixed by caching, one by batching transfers, and one not at all.  Measuring
+ * launches was how we learnt that cutting them eightfold changed nothing.
+ *
+ * THE PHASES ARE DISJOINT and, summed, are the time inside pim_op_*.  launch_us is
+ * NOT one of them — it is the poll-only subset of run_us, so run_us - launch_us is
+ * what the IMEM transfer and the two MMIO writes cost. */
 typedef struct {
-	uint64_t launch_us;   /* summed over every doorbell            */
+	uint64_t launch_us;   /* doorbell -> done, summed over every launch */
 	uint32_t polls;
 	uint32_t nlaunch;     /* doorbells; more than one when IMEM is the limit */
 	uint32_t nisr;
 	uint32_t nwrvec;      /* vector loads, the number DUAL halves  */
 	uint32_t nop;
+
+	/* --- disjoint phases, microseconds ------------------------------------ */
+	uint64_t pad_us;      /* zero the vector's tail beat, copy to staging     */
+	uint64_t vup_us;      /* staging -> GPR, one pwrite per piece             */
+	uint64_t gen_us;      /* pass 1: build the logical program                */
+	uint64_t low_us;      /* pass 2: resolve, check, legalise, relocate       */
+	uint64_t run_us;      /* IMEM transfer + doorbell + poll                  */
+	uint64_t back_us;     /* GPR -> staging, one pread per launch             */
+	uint64_t unpack_us;   /* staging -> the caller's buffer                   */
 } pim_rt_stat;
 
 void pim_rt_stat_get  (const pim_rt *r, pim_rt_stat *out);
@@ -112,6 +160,31 @@ const char *pim_op_matvec(pim_rt *r, const pim_tensor *m,
                           uint32_t red_off, uint32_t red_len,
                           const uint16_t *v, uint16_t *y,
                           pim_acc_mode mode);
+
+/* ============================== stacking ===================================
+ * The same op, split so several can share one doorbell.
+ *
+ *     pim_op_begin(rt, mode)
+ *     pim_op_add(rt, ...)      x N        <- 32 attention heads, say
+ *     pim_op_submit(rt)                   <- one launch
+ *
+ * pim_op_matvec() is exactly begin + add + submit and stays the right call for a
+ * single large op; there is nothing to gain from stacking a program that already
+ * fills IMEM.
+ *
+ * pim_op_add MAY LAUNCH.  When the next piece would not fit — IMEM, the GPR
+ * scratch, or max_batch — it submits what it has and starts a fresh program with
+ * that piece.  The results are identical either way; only the launch count moves,
+ * and pim_rt_stat reports it.  Refusing instead would make every caller implement
+ * the same retry.
+ *
+ * `y` MUST STAY VALID UNTIL submit, because that is when it is written. */
+const char *pim_op_begin (pim_rt *r, pim_acc_mode mode);
+const char *pim_op_add   (pim_rt *r, const pim_tensor *m,
+                          uint32_t out_first, uint32_t out_count,
+                          uint32_t red_off, uint32_t red_len,
+                          const uint16_t *v, uint16_t *y);
+const char *pim_op_submit(pim_rt *r);
 
 /* Outputs pim_op_matvec writes for a given out_count — the size `y` must have.
  * Worth a function because it is nch*nbank*out_count and getting it from the tensor

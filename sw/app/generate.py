@@ -86,6 +86,15 @@ def main() -> int:
     ap.add_argument("--chat", action="store_true",
                     help="wrap the prompt in the model's chat template.  Needs an "
                          "-Instruct model; the base models have no template")
+    ap.add_argument("--profile", action="store_true",
+                    help="break the run down by phase: codegen, PCIe, doorbell, "
+                         "and what was left over for Python")
+    ap.add_argument("--trace", metavar="FILE",
+                    help="write a Chrome trace: span / op / phase, three levels "
+                         "deep.  Open it at ui.perfetto.dev.  Implies --profile")
+    ap.add_argument("--torch-trace", metavar="FILE",
+                    help="additionally write torch's own trace of the host side — "
+                         "every aten op, with the PIM launches among them")
     ap.add_argument("--backend", choices=("pim", "torch"), default="pim",
                     help="pim runs the linears and both attention matmuls on the "
                          "card; torch is the reference")
@@ -145,12 +154,21 @@ def main() -> int:
         # The streamer prints each token as it lands, then the joined text and the
         # rate; a second print here would only repeat it.
         print(f"\n  prompt: {args.prompt!r}")
-        m.generate(args.prompt, max_new_tokens=args.max_new_tokens, stream=True,
-                   chat=args.chat)
-        st = m.rt.stats()
-        print(f"  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISAs, "
-              f"{st['nwrvec']} vector loads, {st['launch_us'] / 1e6:.2f} s on the "
-              f"doorbell")
+        if args.profile or args.trace or args.torch_trace:
+            from pimllm.profile import Profile
+            with Profile(m.rt, trace=args.trace,
+                         torch_trace=args.torch_trace) as prof:
+                m.generate(args.prompt, max_new_tokens=args.max_new_tokens,
+                           stream=True, chat=args.chat)
+            print()
+            print(prof.report())
+        else:
+            m.generate(args.prompt, max_new_tokens=args.max_new_tokens, stream=True,
+                       chat=args.chat)
+            st = m.rt.stats()
+            print(f"  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISAs, "
+                  f"{st['nwrvec']} vector loads, {st['launch_us'] / 1e6:.2f} s on "
+                  f"the doorbell")
         m.free()
         return 0
 
