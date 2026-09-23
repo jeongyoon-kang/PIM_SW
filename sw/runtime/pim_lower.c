@@ -45,6 +45,7 @@ void pim_logical_init(pim_logical *lp, pim_isr *isr, uint32_t isr_cap,
     lp->ref = ref;   lp->nref = 0;   lp->ref_cap = ref_cap;
     lp->atom = atom; lp->natom = 0;  lp->atom_cap = atom_cap;
     lp->nch = nch;
+    lp->nsplit = 0;
     lp->nlatch = nlatch ? nlatch : 1u;
 }
 
@@ -72,7 +73,12 @@ const char *pim_logical_push_ref(pim_logical *lp, const pim_isr *isr,
     lp->ref[lp->nref++] = (pim_ref){
         .isr = lp->nisr - 1, .kind = kind, .split = split,
         .base = base, .len = len, .index = index, .tag = tag,
+        .nsplit_before = lp->nsplit,
     };
+    // ONE REFERENCE PER ISR, ALWAYS: this function pushes the instruction itself
+    // just above, so no two references can name the same one and the split count
+    // below is a running total rather than a set.
+    if (split == PIM_SPLIT_PER_CHANNEL) lp->nsplit++;
     return NULL;
 }
 
@@ -88,31 +94,32 @@ const char *pim_logical_atom(pim_logical *lp, uint32_t first, uint32_t last)
 }
 
 // ------------------------------------------------------------- sizing -------
-// How many ISRs each logical one can become.  Only a per-channel split grows.
-static uint32_t fanout(const pim_logical *lp, uint32_t isr)
-{
-    for (uint32_t i = 0; i < lp->nref; i++)
-        if (lp->ref[i].isr == isr && lp->ref[i].split == PIM_SPLIT_PER_CHANNEL)
-            return lp->nch;
-    return 1;
-}
-
+// Only a per-channel split grows a logical ISR, and pim_logical counts those as
+// they are pushed.
+//
+// THIS USED TO WALK EVERY REFERENCE FOR EVERY INSTRUCTION, which is quadratic and
+// was called once per stacked piece — so stacking a prefill layer's 192 pieces
+// spent more time asking how long the program was than building it.
 uint32_t pim_lower_isr_count(const pim_logical *lp)
 {
-    uint32_t n = 0;
     if (!lp) return 0;
-    for (uint32_t i = 0; i < lp->nisr; i++)
-        n += fanout(lp, i);
-    return n;
+    return lp->nisr + lp->nsplit * (lp->nch ? lp->nch - 1u : 0u);
 }
 
 // Where logical ISR `i` starts once everything before it has been expanded.
+// References are pushed with their instruction, so their .isr is strictly
+// increasing and the first one at or after `i` carries the count we want.
 static uint32_t mapped(const pim_logical *lp, uint32_t i)
 {
-    uint32_t n = 0;
-    for (uint32_t k = 0; k < i; k++)
-        n += fanout(lp, k);
-    return n;
+    uint32_t lo = 0, hi = lp->nref, before;
+
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (lp->ref[mid].isr < i) lo = mid + 1;
+        else                      hi = mid;
+    }
+    before = lo < lp->nref ? lp->ref[lo].nsplit_before : lp->nsplit;
+    return i + before * (lp->nch ? lp->nch - 1u : 0u);
 }
 
 const char *pim_lower_atoms(const pim_logical *lp, pim_atom *out, uint32_t cap,
@@ -126,8 +133,9 @@ const char *pim_lower_atoms(const pim_logical *lp, pim_atom *out, uint32_t cap,
     for (uint32_t i = 0; i < lp->natom; i++) {
         uint32_t last = lp->atom[i].last;
         out[i].first = mapped(lp, lp->atom[i].first);
-        // The atom ends at the LAST ISR the final logical one expanded into.
-        out[i].last  = mapped(lp, last) + fanout(lp, last) - 1;
+        // The atom ends at the LAST ISR the final logical one expanded into, which
+        // is where the NEXT one starts, less one.
+        out[i].last  = mapped(lp, last + 1) - 1;
     }
     return NULL;
 }
@@ -226,12 +234,16 @@ const char *pim_prog_lower_ctx(pim_ctx *c, const pim_logical *lp, pim_prog *out,
         return lo_err;
     }
 
-    for (uint32_t i = 0; i < lp->nisr; i++) {
+    // A CURSOR, NOT A SEARCH.  References are pushed with the instruction they
+    // belong to, so their isr is strictly increasing and one walk covers both.
+    // Searching from zero for each instruction made lowering quadratic, and pass 2
+    // is a fifth of a token.
+    for (uint32_t i = 0, k = 0; i < lp->nisr; i++) {
         const pim_ref *r = NULL;
         const char *bad;
 
-        for (uint32_t k = 0; k < lp->nref; k++)
-            if (lp->ref[k].isr == i) { r = &lp->ref[k]; break; }
+        while (k < lp->nref && lp->ref[k].isr < i) k++;
+        if (k < lp->nref && lp->ref[k].isr == i) r = &lp->ref[k];
 
         // No blank to fill: the kernel already knew the field.
         if (!r) {

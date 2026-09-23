@@ -97,6 +97,13 @@ typedef struct {
 	 * an allocation whose contents have no layout — a GPR vector, say, which is
 	 * just consecutive words. */
 	uint64_t     tag;
+
+	/* HOW MANY PER-CHANNEL SPLITS COME BEFORE THIS ONE, counted as references are
+	 * pushed.  It is what makes "where does logical ISR i land once everything
+	 * before it has been expanded" a binary search instead of a walk over every
+	 * reference of every instruction — which, being called once per atom, made
+	 * lowering cubic in the length of a stacked program. */
+	uint32_t     nsplit_before;
 } pim_ref;
 
 /* ============================== atoms ======================================
@@ -121,6 +128,9 @@ typedef struct {
 	pim_ref  *ref;   uint32_t nref,  ref_cap;
 	pim_atom *atom;  uint32_t natom, atom_cap;
 	uint32_t  nch;   /* channels the kernel built for; lowering checks it */
+	uint32_t  nsplit;/* references that become nch ISRs; kept as they are pushed
+	                  * so pim_lower_isr_count() is O(1) and a caller stacking
+	                  * pieces may ask after every one of them */
 
 	/* HOW MANY ACCUMULATOR LATCHES THIS SCHEDULE USES.  1, or 2 for a schedule
 	 * that pairs output groups across ISR[35].
