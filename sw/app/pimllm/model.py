@@ -32,7 +32,7 @@ from transformers import TextStreamer
 
 from . import attention, ops, profile
 from .budget import ModelShape, plan
-from .cache import PimCache
+from .cache import PimCache, PimOutOfMemory
 from .device import Geometry
 
 
@@ -155,11 +155,11 @@ class PimModel:
     budget that is checked in two places is a budget that closes in neither.
     """
 
-    def __init__(self, hf_id: str, s_max: int = 8192, geometry: Geometry | None = None,
+    def __init__(self, hf_id: str, geometry: Geometry | None = None,
                  verbose: bool = True):
         from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-        self.hf_id, self.s_max, self.verbose = hf_id, s_max, verbose
+        self.hf_id, self.verbose = hf_id, verbose
         cfg = AutoConfig.from_pretrained(hf_id)
         self.shape = ModelShape.from_hf_config(cfg, hf_id)
 
@@ -168,22 +168,25 @@ class PimModel:
             from .device import geometry as read_geometry
             geometry = read_geometry()
         self.geometry = geometry
-        self.budget = plan(geometry, self.shape, s_max)
+        self.budget = plan(geometry, self.shape)
         if verbose:
             print(self.budget.report())
         if not self.budget.fits:
             raise MemoryError(
-                f"{self.shape.name} at S_max {s_max} needs "
-                f"{self.budget.total / 2**30:.2f} GiB of the "
-                f"{self.budget.capacity / 2**30:.2f} GiB on this image.  "
-                f"S_max {self.budget.max_s_max()} would fit."
+                f"{self.shape.name}'s weights need "
+                f"{self.budget.weight_bytes / 2**30:.2f} GiB of the "
+                f"{self.budget.capacity / 2**30:.2f} GiB on this image, with no room "
+                f"left for the KV."
             )
+        # The most tokens a sequence can reach, and what limits it.
+        self.max_tokens, self.max_tokens_limit = self.budget.max_tokens()
 
         # ---- the runtime.  Sized from the shape, not guessed -----------------
         #
-        # max_red is the longest reduction any op will ask for: an FFN's input, or
-        # the sequence when S·V reduces over it.  max_out_groups is the widest
-        # output, which is lm_head's vocabulary.
+        # max_red is the longest reduction a linear layer asks for; attention's S·V
+        # reduces over the sequence and the runtime grows its staging buffer for it
+        # as the sequence gets longer.  max_out_groups is the widest output, which
+        # is lm_head's vocabulary.
         per = geometry.outputs_per_group
         # ATTENTION STACKS A WHOLE LAYER, not a whole position: every query
         # position of every head goes into one program and the runtime splits it
@@ -195,7 +198,7 @@ class PimModel:
         # the FFN's 16 KiB for each piece, and an attention query is 128 B — 4 MiB
         # of GPR would hold 256 pieces instead of thousands.
         self.rt = ops.Runtime(
-            max_red=max(self.shape.hidden, self.shape.intermediate, s_max),
+            max_red=max(self.shape.hidden, self.shape.intermediate),
             max_out_groups=(self.shape.vocab + per - 1) // per,
             max_batch=4096,
             vec_bytes=1 << 20,
@@ -217,7 +220,7 @@ class PimModel:
         if verbose:
             print(f"  {n} linear layers, {total / 2**30:.2f} GiB on the card")
 
-        self.cache = PimCache(self.rt, self.shape.layers, s_max)
+        self.cache = PimCache(self.rt, self.shape.layers)
 
     # ------------------------------------------------------------------------
     def generate(self, prompt: str, max_new_tokens: int = 32, stream: bool = True,
@@ -246,13 +249,22 @@ class PimModel:
             ids = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)
         else:
             ids = self.tokenizer(prompt, return_tensors="pt")
+        n_prompt = ids["input_ids"].shape[1]
+        if n_prompt + max_new_tokens > self.max_tokens:
+            print(f"  NOTE: {n_prompt} prompt + {max_new_tokens} new tokens is past the "
+                  f"{self.max_tokens:,} this model can reach here (limited by "
+                  f"{self.max_tokens_limit}); it will stop there.")
         self.cache.reset()
         streamer = TimedStreamer(self.tokenizer, self.rt) if stream else None
-        with torch.no_grad():
-            out = self.model.generate(
-                **ids, max_new_tokens=max_new_tokens, do_sample=False,
-                past_key_values=self.cache, use_cache=True, streamer=streamer,
-                pad_token_id=self.tokenizer.eos_token_id, **kw)
+        try:
+            with torch.no_grad():
+                out = self.model.generate(
+                    **ids, max_new_tokens=max_new_tokens, do_sample=False,
+                    past_key_values=self.cache, use_cache=True, streamer=streamer,
+                    pad_token_id=self.tokenizer.eos_token_id, **kw)
+        except PimOutOfMemory as e:
+            print(f"\n  STOPPED: {e}", flush=True)
+            return "".join(streamer.text) if streamer else ""
         return self.tokenizer.decode(out[0], skip_special_tokens=True)
 
     def free(self) -> None:

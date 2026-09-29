@@ -21,11 +21,15 @@ override CFLAGS += -I../../include
 LDFLAGS ?= -L.. -L../../lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 LDLIBS  ?= -lpimrt -lpim
 
+# Every binary here depends on the public headers: a struct that grows in one of
+# them changes what the library writes into the caller's copy.
+HDRS := $(wildcard ../../include/pim/*.h ../../include/pimrt/*.h)
+LIBS := ../libpimrt.so ../../lib/libpim.so
+
 .PHONY: all run clean
 all: gemv_test tlatch_test col_probe eager_board tensor_board op_board xfer_bench
 
-%_test: %_test.c ../libpimrt.so ../../lib/libpim.so \
-        ../../include/pimrt/pim_gemv.h ../../include/pimrt/pim_exec.h
+%_test: %_test.c $(LIBS) $(HDRS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
 ../libpimrt.so:
@@ -37,29 +41,29 @@ all: gemv_test tlatch_test col_probe eager_board tensor_board op_board xfer_benc
 # THE HARDWARE IS SERIAL.  Never run this alongside a probe from hwdef/test.
 # col_probe asks the board a question rather than checking a known answer, so it is
 # not part of `run`.  It needs hwdef for the ISR encoder: it builds its own program.
-col_probe: col_probe.c
-	$(CC) $(CFLAGS) -I../../../hwdef -o $@ $^ $(LDFLAGS) $(LDLIBS)
+col_probe: col_probe.c $(LIBS) $(HDRS)
+	$(CC) $(CFLAGS) -I../../../hwdef -o $@ $< $(LDFLAGS) $(LDLIBS)
 
 # tensor_board hand-assembles its ISRs the way col_probe does, so it needs hwdef for
 # the encoder.  It is the board half of lib/test/tensor_test: that one proves
 # placement against a simulated card, this one asks the real datapath the question
 # no simulation can answer.
-tensor_board: tensor_board.c
-	$(CC) $(CFLAGS) -I../../../hwdef -o $@ $^ $(LDFLAGS) $(LDLIBS)
+tensor_board: tensor_board.c $(LIBS) $(HDRS)
+	$(CC) $(CFLAGS) -I../../../hwdef -o $@ $< $(LDFLAGS) $(LDLIBS)
 
 # op_board needs no hwdef: pim_op_matvec is the point at which the ISR encoding
 # stops being the caller's problem, and a test that reached for emu_regs.h here
 # would be testing a layer below the one it is about.
-op_board: op_board.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+op_board: op_board.c $(LIBS) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
-eager_board: eager_board.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+eager_board: eager_board.c $(LIBS) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
 # Asks what a small transfer costs, rather than checking a known answer.  Not in
 # `run` for the same reason col_probe is not.
-xfer_bench: xfer_bench.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS) -lpthread
+xfer_bench: xfer_bench.c $(LIBS) $(HDRS)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS) -lpthread
 
 run: all
 	./gemv_test

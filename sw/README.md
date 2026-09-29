@@ -45,18 +45,19 @@ driver 를 전혀 필요로 하지 않는다 — 공유하는 것이 헤더 하�
 ## 2. 실행 준비
 
 ```sh
-cd drv && make load CH=4        # insmod pim.ko pim_channels=4 ...
+cd drv && make load             # insmod pim.ko (기본값 = platform/config)
 cat /proc/pim                   # 두 pool 의 장부 상태
 ../../scripts/qdma_queues.sh setup
 ```
 
-**채널 수는 insmod 인자다** (설계 §6.4). 재빌드가 아니다. 이것이 hwdef 방식과의
-가장 큰 차이고, 이 스택을 새로 만드는 이유의 절반이다.
+**채널 수는 pim.ko 가 갖는다** (설계 §6.4). 모듈 인자의 기본값이 빌드 때
+`platform/config` 에서 들어가고, insmod 인자로 덮을 수 있다. libpim 은 `GET_INFO` 로
+받으므로 채널 수가 바뀌어도 다시 빌드하지 않는다.
 
 | | hwdef/ + runtime/ (기존) | sw/ (이것) |
 |---|---|---|
-| 채널 수 출처 | `platform/*.conf` → `-D` → 컴파일 상수 | `insmod` 인자 → `GET_INFO` |
-| 채널 바꾸기 | `setup.sh` 가 전체 재빌드 | `rmmod` / `insmod` |
+| 채널 수 출처 | `platform/config` → `pim_config.h` → 컴파일 상수 | pim.ko 인자(기본값 = `platform/config`) → `GET_INFO` |
+| 채널 바꾸기 | `make` | `make` 후 `make -C drv reload` |
 | 불일치 사고 | 빌드와 보드가 갈릴 수 있음 | 진실이 한 곳 |
 
 ## 3. 두 개의 pool (설계 §9.4)

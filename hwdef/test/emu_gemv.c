@@ -156,8 +156,8 @@ static void timing_print_now(void)
     printf("    timing : faw=%u rrd=%u rcd=%u ccd=%u rtp=%u rp=%u wr=%u ras=%u\n",
            cfr_rd(CFR_T_FAW), cfr_rd(CFR_T_RRD), cfr_rd(CFR_T_RCD), cfr_rd(CFR_T_CCD),
            cfr_rd(CFR_T_RTP), cfr_rd(CFR_T_RP),  cfr_rd(CFR_T_WR),  cfr_rd(CFR_T_RAS));
-    printf("             mod=%u rpab=%u\n",
-           cfr_rd(CFR_T_MOD), cfr_rd(CFR_T_RP_AB));
+    printf("             mod=%u rpab=%u gb=%u\n",
+           cfr_rd(CFR_T_MOD), cfr_rd(CFR_T_RP_AB), cfr_rd(CFR_T_GB));
 }
 
 static void viol_report_ch(unsigned ch)

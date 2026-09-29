@@ -1,0 +1,20 @@
+# 보드에 올린 이미지에 맞춰 아래 값을 적고, emulator_top/ 에서 make 한다.
+
+# 채널 수: 1, 2, 4
+CH=2
+
+# 이미지 리비전. 같은 채널 수의 conf 가 platform/ 에 하나뿐이면 비워 둔다.
+# 예: REV=v2.0 → platform/ch2_v2.0.conf
+REV=
+
+# 채널 주소 매핑: 1 = ChRoBaCo, 2 = RoChBaCo
+#
+# 호스트 주소를 채널로 나누는 것은 PL 의 채널 스위치다. MC 경로(0x0204_0000_0000~)
+# 앞단에 있고, 어느 방식으로 해석할지는 스위치의 MODE 레지스터(0x0202_0040_5000,
+# BAR2 +0x405000, bit0: 0 = ChRoBaCo, 1 = RoChBaCo)가 정한다.
+# 이 값은 SW 가 스위치와 같은 방식으로 주소를 계산하도록 알려 주는 것이므로, 보드의
+# MODE 설정과 같아야 한다. HBM 직접 접근 경로는 스위치를 거치지 않아 영향이 없다.
+#
+# 재프로그래밍 직후 MODE 는 0 (ChRoBaCo) 이다. make 한 뒤 hwdef/test/emu_sanity 를
+# 실행하면 보드 점검과 함께 MODE 가 이 값으로 설정된다.
+ADDR_MAP=2

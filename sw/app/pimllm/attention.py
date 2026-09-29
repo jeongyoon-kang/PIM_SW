@@ -72,7 +72,7 @@ def pim_attention_forward(module, query: torch.Tensor, key, value,
             f"head_dim {d} is not a multiple of {per} outputs per supergroup, so a "
             f"head's slice of V does not land on supergroup boundaries"
         )
-    ngroup = (n_kv + per - 1) // per
+    ngroup = layer.k.groups(n_kv)                # MAC groups covering keys [0, n_kv)
     wide = rt.outputs(ngroup)                    # padding outputs included
     first_q = n_kv - s_q                         # absolute position of query 0
 

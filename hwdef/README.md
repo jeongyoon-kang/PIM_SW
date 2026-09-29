@@ -155,16 +155,16 @@ CFR 은 `addr[7:0]` 만 디코드한다 — 4 KB 안에서 **256 B 마다 반복
 |---|---|---|
 | `emu_regs.h` | 0 | **이미지마다 같은 것만** — BAR2 제어 평면, 256 b geometry, ISR 인코딩 |
 | `pim_platform.{h,c}` | 0 | **이미지마다 다른 것 전부** — 채널 수, bank stride/window, MC base, 정책. 전부 **컴파일 상수**다 (아래 참조). `runtime/libpim.so` 도 이 파일을 링크한다 |
-| `pim_config.h` | 0 | 그 상수들의 **정적 기본값(ch4)**. `#ifndef` 가드가 걸려 있어 `-D` 로 덮인다 |
-| `gen_config.sh` | 0 | 활성 `.conf` → `--defs` 로 `-D` 목록 출력. conf 키↔매크로 매핑이 사는 유일한 곳 |
-| `../platform/select.sh` | 0 | 어느 `.conf` 가 활성인지 결정. `reprogram.sh` 와 `setup_permissions.sh` 가 source 한다 (`setup.sh` 는 conf 를 직접 읽는다) |
+| `pim_config.h` | 0 | 그 상수들. **생성물** — `make` 가 `platform/config` 로부터 매번 만들고, 내용이 바뀔 때만 다시 쓴다. git 에 없다 |
+| `gen_config.sh` | 0 | 활성 `.conf` → `--header` 로 `pim_config.h` (hwdef 와 `pim.ko` 의 기본값이 쓴다). conf 키↔매크로 매핑이 사는 유일한 곳. 환경변수는 읽지 않는다 |
+| `../platform/config` | 0 | **사용자가 한 번 설정하는 파일.** `CH`, `REV`, `ADDR_MAP`. `config.example` 에서 복사. git 에 없다 |
+| `../platform/select.sh` | 0 | `common.conf` 만 source. `qdma_queues.sh` 와 `setup_permissions.sh` 용. 빌드는 이걸 거치지 않는다 |
 | `../platform/common.conf` | 0 | 보드 값 (BDF, 드라이버, 큐, 권한) |
-| `../platform/ch{1,2,4}.conf` | 0 | **채널 수·주소·정책.** 채널 의존성이 사는 유일한 곳 |
-| `setup.sh` | 0 | `--platform chN` 으로 활성 `.conf` 선택 **+ `-D` 를 만들어 4번 make**. 상수가 바뀌면 `clean` 을 선행한다 (+ 큐/권한) |
-| `reprogram.sh` | 0 | PDI 프로그래밍 + PCIe 재열거 + sanity. `HW_DIR` 은 활성 `.conf` 가 준다 |
+| `../platform/<이미지>.conf` | 0 | **이미지 리비전 하나당 하나** (`ch1_r1p0`, `ch2_v2.0`, `ch4`). 그 이미지의 사실값(채널 수·주소·정책)만. 일반 대입만 |
+| `reprogram.sh` | 0 | PDI 프로그래밍 + PCIe 재열거. **하드웨어만** — `platform/` 은 `common.conf` 외에 읽지도 쓰지도 않는다 |
 | `qdma_queues.sh` | 0 | MM 큐 생성/삭제/상태 |
 | `setup_permissions.sh` | 0 | udev 권한 (한 번만) |
-| `emu_sanity.c` | 1 | CFR write/readback + 위반 CSR 읽기 |
+| `emu_sanity.c` | 1 | CFR write/readback + 위반 CSR 읽기 + 매핑 레지스터(MODE_CTRL)를 빌드된 `ADDR_MAP` 으로 설정 |
 | `emu_gpr_loop.c` | 2 | GPR 4 MiB QDMA 루프백 |
 | `emu_hbm_direct.c` | 2 | HBM 주소 범위 QDMA 도달 확인 |
 | `emu_mc.c` | 2 | MC normal path — **양방향**. 직접 창을 기준면으로 쓴다 |
@@ -177,25 +177,25 @@ CFR 은 `addr[7:0]` 만 디코드한다 — 4 KB 안에서 **256 B 마다 반복
 | `../runtime/test/load_test.c` | **3** | **실제 행렬을 올리고 그걸로 GEMV.** 되읽기(배치) + GEMV(ISA가 보는 위치) 두 검사 |
 
 ```sh
-../../scripts/setup.sh --platform ch2      # 선택 + 전체 재빌드.  이것만 쓴다
+vi ../platform/config      # CH / REV / ADDR_MAP — 보드에 올린 이미지에 맞춰 한 번
+make -C ..                 # emulator_top/ 에서 make.  config 를 고친 뒤에도 같다
+../hwdef/test/emu_sanity   # 재프로그래밍 뒤 한 번: 보드 점검 + 매핑 레지스터 설정
 ```
 
-**채널 수·stride·window 는 컴파일 상수다.** `setup.sh` 가 활성 conf 를
-`gen_config.sh --defs` 로 `-D` 목록으로 만들어 네 번의 make 에 넘긴다. `pim_config.h`
-에 ch4 기본값이 `#ifndef` 로 들어 있어 맨손 `make` 도 컴파일은 되지만, 그런 빌드는
-`PIM_CONFIG_FROM_CONF` 가 0 이라 **모든 도구가 실행을 거부한다** — 아무도 고르지 않은
-채널 수로 도는 것이 가장 나쁜 실패이기 때문이다.
+**채널 수·stride·window 는 컴파일 상수다.** hwdef 의 `make` 가 `gen_config.sh --header`
+로 `platform/config` 의 `CH`(와 `REV`)에 해당하는 `chN*.conf` 를 찾아 `ADDR_MAP` 과
+함께 `pim_config.h` 를 생성하고, 이 헤더를 include 하는 모든 것이 이를 의존성으로
+가진다. 헤더는 **내용이 바뀔 때만** 다시 쓰이므로 config 를 고친 뒤 `make` 하면 필요한
+것만 다시 빌드된다. conf 에 키가 빠지면 생성이 에러로 멈춘다.
 
-`-D` 는 make 가 못 본다. 그래서 `setup.sh` 는 상수가 바뀌었으면(또는 이 스크립트를
-거치지 않고 빌드된 흔적이 있으면) **`clean` 을 먼저** 하고, 성공한 뒤에만
-`platform/.built` 에 무엇으로 빌드했는지 남긴다. `--status` 가 그걸 읽어 활성 conf 와
-대조한다 — `cat pim_config.h` 는 이제 항상 ch4 라고 답하므로 그 자리를 대신할 것이
-필요하다.
+`pim_platform_check()` 는 실행 시 `platform/config` 의 `CH`/`REV`/`ADDR_MAP` 을 다시
+읽어 빌드 때 값과 비교하고, config 만 고치고 다시 빌드하지 않은 바이너리를 거부한다.
+`make info` 가 지금 무엇이 선택되는지 보여 준다.
 
 도구마다 첫 두 줄에 무엇으로 빌드됐는지 찍는다:
 
 ```
-platform ch2 (compiled in)  —  2 ch x 16 bank, window 256 MiB, stride 1024 MiB
+platform ch2_v2.0  —  2 ch x 16 bank, window 256 MiB, stride 1024 MiB
          upload=direct schedule=group ntail=pad T_latch=off
 ```
 
@@ -208,7 +208,7 @@ platform ch2 (compiled in)  —  2 ch x 16 bank, window 256 MiB, stride 1024 MiB
 
 `--platform NAME` 은 **없다.** 여러 도구의 `--help` 에 아직 남아 있지만 getopt 테이블에
 없는 잔재다 — 런타임 conf 파싱이 폐지될 때 도움말이 따라오지 않았다. 플랫폼은
-`setup.sh --platform` 으로 고르고 다시 빌드하는 것이지 실행 시 고르는 것이 아니다.
+`platform/config` 를 고치고 다시 빌드하는 것이지 실행 시 고르는 것이 아니다.
 
 ---
 

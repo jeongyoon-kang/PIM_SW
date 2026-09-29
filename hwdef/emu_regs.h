@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>       // snprintf, used to print an ISR word as hex
 #include <string.h>      // memset/memcpy, used by the ISR builder and the BF16 pair
 
 // ============================== BAR2 -> AXI ===================================
@@ -144,6 +145,7 @@
 #define CFR_RUN_CYC_HI      0x30u   // RO  v2.0
 #define CFR_T_MOD           0x34u   // v2.0  REGISTER <-> BANK mode switch stall
 #define CFR_T_RP_AB         0x38u   // v2.0  ALL-bank PRE -> ACT
+#define CFR_T_GB            0x3Cu   // v2.0  WRVEC beat -> next beat into the Global Buffer
 
 #define CFR_CTRL_DOORBELL   (1u << 0)
 #define CFR_CTRL_MODE_ALLBK (1u << 1)
@@ -160,21 +162,25 @@
 // of the rows EOS precharges happens after this value stops moving.
 #define CFR_RUN_CYC(lo, hi) (((uint64_t)(hi) << 32) | (uint32_t)(lo))
 
-// ELEVEN BUDGETS, NOT EIGHT.  v2.0 added T_MOD and T_RP_AB, and widened every one
-// to 10 bits -- a uint8_t silently truncated 1023 to 255 and the result looked like
-// a timing that was simply fast.
+// The eleven timing budgets, in PL clock cycles, 10 bits each (0..1023).  v2.0 has
+// three beyond v1's eight:
 //
-// T_MOD is new in kind, not just in name.  The controller holds one mode per
-// channel: WRVEC and RD_MAC need REGISTER, MAC/COPY/EWMUL need BANK, and a switch
-// stalls issue for T_MOD cycles.  A WRVEC -> MAC -> RD_MAC schedule therefore pays
-// it TWICE per group, which is what argues for stacking same-family instructions.
+//   T_MOD    the stall when a channel switches between REGISTER mode (WRVEC, RD_MAC)
+//            and BANK mode (MAC, COPY, EWMUL).  WRVEC -> MAC -> RD_MAC pays it twice.
+//   T_RP_AB  PRECHARGE ALL -> ACT.  An all-bank span and EOS's flush are charged
+//            with it; a single-bank PRE with T_RP.
+//   T_GB     the spacing of WRVEC's beats into the Global Buffer.  Those beats ride
+//            no bank command, so T_CCD does not space them; at 0 they move at the
+//            GPR read rate, 2 cycles a beat.  The actual spacing is the larger of the
+//            two.
 //
-// T_RP_AB is the budget v1 was missing: PRECHARGE ALL was being charged at the
-// single-bank T_RP, so an all-bank span and EOS's flush were both under-counted.
+// The fields are in the order of the registers' names, not their offsets:
+// T_MOD, T_RP_AB and T_GB sit above PROG_LEN and RUN_CYC.
 struct emu_timing {
     uint16_t faw, rrd, rcd, ccd, rtp, rp, wr, ras;
     uint16_t mod;      // v2.0  T_MOD
     uint16_t rp_ab;    // v2.0  T_RP_AB
+    uint16_t gb;       // v2.0  T_GB
 };
 
 // HANDOFF §2's starting values.  Two warnings travel with them:
@@ -183,12 +189,15 @@ struct emu_timing {
 //   T_RCD=4 DOES raise ACT_FILL violations and that is correct: HANDOFF §2 measured
 //   overrun 3 against an ideal zero-delay memory model.  The emulator is reporting
 //   that memory was slower than the model.  T_RCD=8 is quiet if that is wanted.
-// The two v2.0 values are PLACEHOLDERS: nothing has measured what an all-bank
-// precharge or a mode switch actually costs on this image.
-#define EMU_TIMING_SIM    ((struct emu_timing){ 30, 6, 4, 2, 3, 3, 4, 6, 0, 3 })
-#define EMU_TIMING_QUIET  ((struct emu_timing){ 30, 6, 8, 2, 3, 3, 4, 6, 0, 3 })
+// T_MOD and T_RP_AB are placeholders: nothing has measured what a mode switch or an
+// all-bank precharge costs on this image.  T_GB takes T_CCD's value, as the AiM
+// timing does (nCCDS = nCCDL).
+#define EMU_TIMING_SIM    ((struct emu_timing){ 30, 6, 4, 2, 3, 3, 4, 6, 0, 3, 2 })
+#define EMU_TIMING_QUIET  ((struct emu_timing){ 30, 6, 8, 2, 3, 3, 4, 6, 0, 3, 2 })
 
 // ============================== channel address map ===========================
+// The PL channel switch in front of the MC s_axi (0x0204_0000_0000 + ch*4 GiB) splits
+// host addresses into channels; its MODE register (BAR2 +0x405000) picks how.
 // WHICH FIELD OF AN ADDRESS NAMES THE CHANNEL.  One bit, and it changes what every
 // host address means — so it is the one piece of device state that can make a
 // correctly written program read someone else's bytes without any error at all.
@@ -297,8 +306,8 @@ struct emu_timing {
 // byte[0].  A word with the fields in the WRONG PLACES still decodes to a
 // plausible instruction — opcode and COL sit low and would survive almost any
 // misplacement above them — so a mis-encoded program is wrong SILENTLY rather
-// than rejected.  EMU_GOLDEN_* below are HANDOFF §3.5's words, to check the
-// encoder against something the hardware actually executed.
+// than rejected.  EMU_GOLDEN_* below are the v2.0 document's §4.1 words, and
+// emu_isr_golden_check() compares the encoder against them.
 #define ISR_OP_MAC      0x0Cu   // verified: all-bank, GB-sourced
 #define ISR_OP_EWMUL    0x0Du   // NOT verified on FPGA
 #define ISR_OP_COPY     0x0Eu   // read half verified (bank->GB), and it MULTICASTS on
@@ -319,8 +328,8 @@ struct emu_timing {
 #define ISR_OP_WRVEC    0x0Fu   // verified: GPR -> GB vector load
 #define ISR_OP_RD_MAC   0x10u   // verified: 16 BF16 lanes land in a GPR word
 #define ISR_OP_EOS      0x11u   // verified: end of program
-#define ISR_OP_WR_SBK   0x12u   // v2.0: GPR -> GB -> one bank.  NOT verified here
-#define ISR_OP_RD_SBK   0x13u   // v2.0: one bank -> GB -> GPR.  NOT verified here
+#define ISR_OP_WR_SBK   0x12u   // v2.0: GPR -> one bank.  On hold, the encoder refuses it
+#define ISR_OP_RD_SBK   0x13u   // v2.0: one bank -> GPR.  On hold, the encoder refuses it
 
 // route[i] port numbering: 0..15 name a bank, 16 is the GB, 31 is "unused".
 // The default MUST be 31 — 0 means "send to bank 0", which is a real destination.
@@ -393,26 +402,34 @@ struct emu_isr_spec {
     uint32_t row;         // DRAM row for MAC/COPY/EWMUL; GPR word for WRVEC/RD_MAC
     uint32_t col;
     uint32_t bk;
-    // CH_MASK[i]=1 means "execute this ISR on channel i".  ISR[34:27].
-    // Whether the ch2 build actually fans out on it is UNVERIFIED: fetch_decode.v
-    // carries `// TODO(CH_MASK)` and the only RTL that reads the field is the
-    // parked validity_gate.  A tool that sets it to 1<<ch and gets the wrong
-    // channel's answer has found that out; that is the point of setting it.
-    uint32_t ch_mask;
+    uint32_t ch_mask;     // CH_MASK[i] = 1 runs this ISR on channel i.  ISR[34:27]
     uint32_t pu_mask;     // banks whose PU computes.  MAC/EWMUL only.
-    uint32_t gb_mc_mask;  // GB broadcast destinations.  MUST equal pu_mask.
+    // MAC: the banks the GB sends the vector to, equal to pu_mask; 0 means the
+    // vector comes from a peer bank instead.  COPY: the banks the write half fills.
+    uint32_t gb_mc_mask;
     uint8_t  route[16];   // 31 = unused.  0 would mean "send to bank 0".
-    bool     t;           // must be 0: the MC hard-ties latch_sel
+    // Accumulator latch, 0 or 1.  A RD_MAC reads and clears the latch it names, so it
+    // has to name the one its MACs accumulated into; the other reads back 0.
+    bool     t;
 };
 
-// HANDOFF §3.7's per-ISR preconditions.  NULL if legal, else the reason.
-// These are PRECONDITIONS, not advice: the validity gate was removed from the
-// fetch path for timing, so the hardware neither checks an ISR nor reports a bad
-// one.  Breaking one of these produces a wrong NUMBER, not an error.
+// A GB-sourced MAC's gb_mc_mask: one bank, one bank of every bank group
+// (0x1111, 0x2222, 0x4444, 0x8888), or all sixteen (v2.0 document §2.1).
+static inline bool emu_gb_mc_valid(uint32_t m)
+{
+    return __builtin_popcount(m) == 1 || m == 0x1111u || m == 0x2222u ||
+           m == 0x4444u || m == 0x8888u || m == 0xFFFFu;
+}
+
+// The per-ISR preconditions of the v2.0 document §2 and §5 (V1-V4).  NULL if
+// legal, else the reason.  The hardware checks none of them, so an ISR that breaks
+// one gives a wrong number or a hang rather than an error.
 static inline const char *emu_isr_check(const struct emu_isr_spec *s)
 {
     if (s->opcode > 0x1Fu)           return "opcode is wider than 5 bits";
-    if (s->t)                        return "T must be 0 (the MC hard-ties latch_sel; a 1 is silently ignored)";
+    if (s->opcode == ISR_OP_WR_SBK || s->opcode == ISR_OP_RD_SBK)
+        return "WR_SBK and RD_SBK are on hold (v2.0 document §2.7): their data path is "
+               "being redesigned, and they overwrite the vector WRVEC left in the GB";
     if (s->ch_mask == 0)             return "CH_MASK must not be 0 (use 0x01)";
     if (s->ch_mask > 0xFFu)          return "CH_MASK is wider than 8 bits";
     if (s->row > EMU_ISR_ROW_MAX)    return "ROW/GPR_ADDR exceeds 17 bits";
@@ -439,6 +456,9 @@ static inline const char *emu_isr_check(const struct emu_isr_spec *s)
         if (s->gb_mc_mask && s->pu_mask != s->gb_mc_mask)
             return "GB-sourced MAC (gb_mc_mask != 0): gb_mc_mask must equal pu_mask, "
                    "or a bank receives the vector without computing (or the reverse)";
+        if (s->gb_mc_mask && !emu_gb_mc_valid(s->gb_mc_mask))
+            return "GB-sourced MAC: gb_mc_mask must be one bank, 0x1111/0x2222/0x4444/"
+                   "0x8888, or 0xFFFF; the hardware does not split other masks";
     }
     if (s->opcode == ISR_OP_EWMUL) {
         if (__builtin_popcount(s->pu_mask) != 1)
@@ -451,6 +471,16 @@ static inline const char *emu_isr_check(const struct emu_isr_spec *s)
         if (s->pu_mask || s->gb_mc_mask)       return "RD_MAC broadcasts to every bank; pu_mask and gb_mc_mask must be 0";
         if (__builtin_popcount(s->ch_mask) != 1)
             return "RD_MAC CH_MASK must be 1-hot, or two channels write the same GPR word";
+    }
+    // WRVEC, RD_MAC and EOS route nothing.  Their route and gb_mc_mask still reach
+    // the crossbar while the channel waits (EOS: the whole flush), so route stays
+    // all 31 and gb_mc_mask 0.
+    if (s->opcode == ISR_OP_WRVEC || s->opcode == ISR_OP_RD_MAC || s->opcode == ISR_OP_EOS) {
+        if (s->pu_mask || s->gb_mc_mask)
+            return "WRVEC, RD_MAC and EOS take pu_mask = gb_mc_mask = 0";
+        for (int i = 0; i < 16; i++)
+            if (s->route[i] != GB_NULL_PORT)
+                return "WRVEC, RD_MAC and EOS take route[] all 31 (NULL); 0 is bank 0";
     }
 
     // route[i]: 0..15 = that bank, 16 = the GB, 31 = unused.  17..30 name nothing.
@@ -518,12 +548,49 @@ static inline struct emu_isr_spec emu_isr_default_ch(uint32_t opcode, uint32_t c
 // therefore reports done while its own result is still in flight.
 static inline bool emu_isr_produces_result(uint32_t opcode) { return opcode == ISR_OP_RD_MAC; }
 
-// HANDOFF §3.5's golden words — what simulation actually pushed through IMEM,
-// MSB on the left.  If the encoder reproduces these the field placement is right.
-#define EMU_GOLDEN_WRVEC  "00000000000000000000ffffffffffffffffffff000000007880000008000000"
-#define EMU_GOLDEN_MAC    "0000000000000000ffffffffffffffffffffffff3fffc0006080000008001900"
-#define EMU_GOLDEN_RD_MAC "00000000000000000000ffffffffffffffffffff000000008000000008010440"
-#define EMU_GOLDEN_EOS    "00000000000000000000ffffffffffffffffffff000000008800000008000000"
+// The v2.0 document's §4.1 GEMV tile, worked out by the RTL side: WRVEC 64 beats
+// from GPR word 0, MAC 64 beats of row 100 from beat 0 on all 16 banks, RD_MAC into
+// GPR word 1041, EOS; channel 0, T 0.  MSB on the left.
+#define EMU_GOLDEN_WRVEC  "0000000000000000000000000007fffffffffffffffffff80003c40008000000"
+#define EMU_GOLDEN_MAC    "000000000000000000000007fffffffffffffffffffffffffffb040008001900"
+#define EMU_GOLDEN_RD_MAC "0000000000000000000000000007fffffffffffffffffff80004000008010440"
+#define EMU_GOLDEN_EOS    "0000000000000000000000000007fffffffffffffffffff80004400008000000"
+
+// An ISR word as 64 hex digits, MSB on the left, the form EMU_GOLDEN_* are written in.
+static inline void emu_isr_hex(const struct emu_isr *p, char out[65])
+{
+    snprintf(out, 65, "%016llx%016llx%016llx%016llx",
+             (unsigned long long)p->w[3], (unsigned long long)p->w[2],
+             (unsigned long long)p->w[1], (unsigned long long)p->w[0]);
+}
+
+// Builds the §4.1 tile with the encoder and compares it with EMU_GOLDEN_*.  NULL if
+// every word matches, else which one differs.  Needs no board.
+static inline const char *emu_isr_golden_check(void)
+{
+    static const char *const want[4] = {
+        EMU_GOLDEN_WRVEC, EMU_GOLDEN_MAC, EMU_GOLDEN_RD_MAC, EMU_GOLDEN_EOS };
+    static const char *const name[4] = {
+        "WRVEC differs from the v2.0 document §4.1 word",
+        "MAC differs from the v2.0 document §4.1 word",
+        "RD_MAC differs from the v2.0 document §4.1 word",
+        "EOS differs from the v2.0 document §4.1 word" };
+    struct emu_isr_spec s[4];
+    struct emu_isr w;
+    char hex[65];
+
+    s[0] = emu_isr_default(ISR_OP_WRVEC);  s[0].opsize = 64; s[0].row = 0;
+    s[1] = emu_isr_default(ISR_OP_MAC);    s[1].opsize = 64; s[1].row = 100; s[1].col = 0;
+    s[1].pu_mask = 0xFFFFu; s[1].gb_mc_mask = 0xFFFFu;
+    s[2] = emu_isr_default(ISR_OP_RD_MAC); s[2].opsize = 0;  s[2].row = 1041;
+    s[3] = emu_isr_default(ISR_OP_EOS);
+    for (int i = 0; i < 4; i++) {
+        if (emu_isr_build(&w, &s[i])) return name[i];
+        emu_isr_hex(&w, hex);
+        if (strcmp(hex, want[i])) return name[i];
+    }
+    return NULL;
+}
 
 // ============================== BF16 =========================================
 static inline uint16_t emu_f32_to_bf16(float f)

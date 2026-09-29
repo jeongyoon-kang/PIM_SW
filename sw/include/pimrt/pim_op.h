@@ -46,13 +46,15 @@ extern "C" {
 typedef struct pim_rt pim_rt;
 
 typedef struct {
-	/* The largest shape this session will ask for.  Both are used to size the
-	 * scratch at open, and both are CHECKED at every call — an op that exceeds
-	 * what was declared is refused rather than quietly reallocating, because a
-	 * realloc on the launch path is the thing this exists to avoid.
+	/* The largest shape a linear layer will ask for.  Both size the scratch at open.
 	 *
-	 * For a transformer: max_red is the largest of (hidden, intermediate, S_max),
-	 * and max_out_groups is the largest out_features divided by nch*nbank. */
+	 * max_red sizes the host staging buffer a vector is zero-padded in before it
+	 * goes to the GPR, and bounds how many output groups one piece takes.  A longer
+	 * reduction — attention's S.V over a long context — grows the staging buffer
+	 * when it arrives; what limits a vector's length is the GPR buffer, vec_bytes.
+	 *
+	 * For a transformer: max_red is the larger of hidden and intermediate, and
+	 * max_out_groups is the largest out_features divided by nch*nbank. */
 	uint32_t max_red;          /* elements on the reduction axis          */
 	uint32_t max_out_groups;   /* supergroups of outputs in ONE op        */
 

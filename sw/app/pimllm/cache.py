@@ -16,12 +16,19 @@ happens.  That is not an optimisation we added, it is work we decline to do.
 WHY K AND V HAVE DIFFERENT LAYOUTS.  It follows from which axis each kernel reduces
 over and is not a choice — see include/pimrt/pim_tensor.h:
 
-    K   OUT_MAJOR  [S_max, H_kv*D]   a token is an OUTPUT      one contiguous write
-    V   RED_MAJOR  [H_kv*D, S_max]   a token is a REDUCTION    a write per output
+    K   OUT_PACKED [tokens, H_kv*D]  a token is an OUTPUT      one contiguous write,
+                                     and several tokens are one contiguous write too
+    V   RED_MAJOR  [H_kv*D, tokens]  a token is a REDUCTION    a write per output
 
 The second line is the cost of attention on this machine.  It is not a defect of
 this file: the bank axis is `row_bytes` apart in the address map, so any write that
 spans banks without filling whole rows is a scatter.
+
+THE CACHE DOES NOT KNOW HOW LONG THE SEQUENCE WILL BE.  K and V are growable
+pim_tensors: before each update the layer grows them to hold every token so far, and
+a grow allocates card pages only when a step boundary is crossed — K every
+nch*nbank*pack tokens, V every 1024.  Every grow is recorded in PimCache.events, and
+running out of card memory raises PimOutOfMemory at the token that needed the page.
 
 NO HOST COPY.  `lazy_initialization` deliberately does not allocate the
 `torch.zeros(B, H_kv, S_max, D)` that `StaticLayer` does — a host mirror of the
@@ -31,10 +38,30 @@ overridden to refuse rather than to silently do nothing.
 """
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
+
 import torch
 from transformers.cache_utils import Cache, CacheLayerMixin
 
 from . import ops
+
+
+class PimOutOfMemory(RuntimeError):
+    """A K or V page could not be allocated: the card memory is full."""
+
+
+@dataclass(frozen=True)
+class GrowEvent:
+    """One page allocation.  `tokens` is how many tokens the cache had to hold when
+    it happened; `room` is how many it holds after."""
+    tokens: int
+    layer: int
+    which: str        # "K" or "V"
+    units: int
+    bytes: int
+    room: int
+    t: float          # time.monotonic()
 
 
 class PimLayer(CacheLayerMixin):
@@ -47,11 +74,13 @@ class PimLayer(CacheLayerMixin):
     is_compileable = False
     is_sliding = False
 
-    def __init__(self, rt: ops.Runtime, s_max: int, layer_idx: int = -1):
+    def __init__(self, rt: ops.Runtime, layer_idx: int = -1,
+                 events: list | None = None, unit_bytes: int = 0):
         super().__init__()
         self.rt = rt
-        self.s_max = s_max
         self.layer_idx = layer_idx
+        self.events = events
+        self.unit_bytes = unit_bytes
         self.k: ops.Tensor | None = None
         self.v: ops.Tensor | None = None
         self.cumulative = 0
@@ -70,13 +99,15 @@ class PimLayer(CacheLayerMixin):
         self.n_kv_heads, self.head_dim = h_kv, d
         width = h_kv * d
 
-        # NO PIM_ALLOC_F_ZERO on either.  K needs none — its reduction length is D,
-        # always beat-aligned, and a garbage OUTPUT stays in its own bank and is
-        # discarded.  V needs the zero invariant but gets it from append's lazy
-        # per-chunk clear, which costs the same in total and only for the chunks a
-        # generation actually reaches.
-        self.k = ops.Tensor(ops.OUT_MAJOR, self.s_max, width)
-        self.v = ops.Tensor(ops.RED_MAJOR, width, self.s_max)
+        # Both start with no room; update() grows them.  K needs no clearing — its
+        # reduction length is D, always beat-aligned, and a garbage OUTPUT stays in
+        # its own bank and is discarded.  V gets its zero invariant from append's
+        # per-chunk clear on first entry, so a fresh page is cleared when the
+        # sequence reaches it.
+        # K is OUT_PACKED: when H_kv*D is half a row or less, neighbouring tokens
+        # share a bank row, so K fills its rows and a run of tokens is one DMA.
+        self.k = ops.Tensor.growable(ops.OUT_PACKED, width)
+        self.v = ops.Tensor.growable(ops.RED_MAJOR, width)
         self.is_initialized = True
 
     # --------------------------------------------------------------- update ---
@@ -95,16 +126,25 @@ class PimLayer(CacheLayerMixin):
         k = key_states.transpose(1, 2).reshape(s, -1).contiguous()
         v = value_states.transpose(1, 2).reshape(s, -1).contiguous()
 
-        if self.cumulative + s > self.s_max:
-            raise RuntimeError(
-                f"layer {self.layer_idx}: {self.cumulative + s} tokens, past the "
-                f"S_max {self.s_max} this cache reserved.  pim_tensor does not grow; "
-                f"open the model with a larger s_max (and check it still fits)."
-            )
+        need = self.cumulative + s
+        self._grow("K", self.k, need)
+        self._grow("V", self.v, need)
         self.k.append(self.cumulative, k)
         self.v.append(self.cumulative, v)
         self.cumulative += s
         return self, self
+
+    def _grow(self, which: str, t: ops.Tensor, need: int) -> None:
+        try:
+            units = t.grow(need)
+        except RuntimeError as e:
+            raise PimOutOfMemory(
+                f"layer {self.layer_idx}: no card memory for a {which} page at token "
+                f"{need} ({which} holds {t.room}): {e}") from e
+        if units and self.events is not None:
+            self.events.append(GrowEvent(need, self.layer_idx, which, units,
+                                         units * self.unit_bytes, t.room,
+                                         time.monotonic()))
 
     # ------------------------------------------------------- what HF asks -----
     def get_mask_sizes(self, query_length: int) -> tuple[int, int]:
@@ -117,13 +157,14 @@ class PimLayer(CacheLayerMixin):
         return self.cumulative
 
     def get_max_length(self) -> int:
-        return self.s_max
+        # -1 is transformers' "no maximum", as for DynamicLayer.
+        return -1
 
     # ------------------------------------------------------------- rollback ---
     def reset(self) -> None:
         """Between generations.  truncate(0) is free — it retracts the lazy-clear
         bookkeeping so the next append re-clears the chunk it touches, rather than
-        moving half a gigabyte now."""
+        moving half a gigabyte now.  The pages stay allocated for the next one."""
         if self.is_initialized:
             self.k.truncate(0)
             self.v.truncate(0)
@@ -161,21 +202,25 @@ class PimLayer(CacheLayerMixin):
         self.is_initialized = False
 
     def __repr__(self):
-        return (f"PimLayer(layer={self.layer_idx}, {self.cumulative}/{self.s_max} "
-                f"tokens, {self.n_kv_heads}x{self.head_dim})")
+        room = self.k.room if self.k is not None else 0
+        return (f"PimLayer(layer={self.layer_idx}, {self.cumulative} tokens, room "
+                f"{room}, {self.n_kv_heads}x{self.head_dim})")
 
 
 class PimCache(Cache):
     """A `Cache` whose layers are all `PimLayer`.
 
     Built eagerly with one layer per model layer rather than `layer_class_to_replicate`,
-    because the layers need the runtime and the S_max and a zero-argument constructor
-    cannot have them.
+    because the layers need the runtime and a zero-argument constructor cannot have it.
+
+    `events` is every page allocation, in order, across all layers.
     """
 
-    def __init__(self, rt: ops.Runtime, n_layers: int, s_max: int):
-        super().__init__(layers=[PimLayer(rt, s_max, i) for i in range(n_layers)])
-        self.s_max = s_max
+    def __init__(self, rt: ops.Runtime, n_layers: int):
+        self.events: list[GrowEvent] = []
+        unit_bytes = ops.geometry()["unit_bytes"]
+        super().__init__(layers=[PimLayer(rt, i, self.events, unit_bytes)
+                                 for i in range(n_layers)])
 
     def reset(self) -> None:
         for lay in self.layers:

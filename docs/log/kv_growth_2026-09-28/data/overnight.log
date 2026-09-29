@@ -1,0 +1,7 @@
+[2026-09-28 18:20:55] start Qwen/Qwen3-0.6B (max-time 12600 s)
+[2026-09-28 21:51:20] end   Qwen/Qwen3-0.6B rc=0
+[2026-09-28 21:51:20] start meta-llama/Llama-3.2-1B-Instruct (max-time 14400 s)
+[2026-09-29 01:52:00] end   meta-llama/Llama-3.2-1B-Instruct rc=0
+[2026-09-29 01:52:00] start meta-llama/Llama-3.2-3B-Instruct (max-time 14400 s)
+[2026-09-29 05:53:30] end   meta-llama/Llama-3.2-3B-Instruct rc=0
+[2026-09-29 05:53:30] all done

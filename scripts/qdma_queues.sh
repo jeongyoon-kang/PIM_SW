@@ -72,8 +72,7 @@ check_tools() {
         echo "         make -C $QDMA_TREE" >&2
         exit 2; }
     [[ -e "/sys/bus/pci/devices/$BDF" ]] || {
-        echo "ERROR: $BDF is not enumerated. Program the PDI and rescan first:" >&2
-        echo "         sudo ./reprogram.sh" >&2
+        echo "ERROR: $BDF is not visible on PCIe" >&2
         exit 2; }
 }
 

@@ -20,31 +20,44 @@
  * is the reduction axis.  Everything below follows from those two sentences.
  *
  * ============================== the layout ==================================
- * THE DEVICE FORMULA IS THE SAME FOR BOTH LAYOUTS, and that is the surprise worth
- * stating plainly, because "K is row-major and V is column-major" suggests two
- * addressing schemes and there is only one.  pim_tensor_offset(g, t, out, red) does
- * not branch on the layout at all.
+ * Inside a broadcast unit the placement is the same for every layout: the output
+ * picks (channel, bank), the reduction picks the column.  Which unit holds MAC group
+ * `group`'s reduction chunk `chunk` follows the growth axis, so that the units a
+ * growing tensor gains come after the ones it already has:
  *
- * What the layout names is the HOST array's index order — which axis you walk to
+ *     OUT_MAJOR, OUT_PACKED   unit = group / pack * nchunks + chunk     group outer
+ *     RED_MAJOR               unit = chunk * ngroups + group            chunk outer
+ *
+ * The layout also names the HOST array's index order — which axis you walk to
  * read the bytes you are about to send:
  *
  *     PIM_LAYOUT_OUT_MAJOR   src is [nout][nred]   one output's run is contiguous
  *     PIM_LAYOUT_RED_MAJOR   src is [nred][nout]   one reduction step's run is
+ *     PIM_LAYOUT_OUT_PACKED  src is [nout][nred], and outputs shorter than half a
+ *                            row share one (t->pack of them, t->slot elements
+ *                            each).  The formula is the same one with pack > 1.
  *
- * It is carried in the tensor, and mixed into the tag, because the two are NOT
- * interchangeable even though the addressing is: bytes placed by an OUT_MAJOR walk
- * and read by a program built for a RED_MAJOR one are transposed, silently, into a
- * plausible wrong number.
+ * It is carried in the tensor and mixed into the tag: bytes placed by an OUT_MAJOR
+ * walk and read by a program built for a RED_MAJOR one give a plausible wrong
+ * number, and the tag is what catches it.
  *
  * ============================== growth =====================================
  * A KV cache grows one token at a time, and WHICH AXIS grows is the layout:
  *
- *     K is OUT_MAJOR   a new token is a new OUTPUT   -> grows along `out`
+ *     K is OUT_PACKED  a new token is a new OUTPUT   -> grows along `out`
  *     V is RED_MAJOR   a new token is a new REDUCTION STEP -> grows along `red`
+ *
+ * A KV tensor is planned with pim_tensor_plan_growable: it starts with no room along
+ * its growth axis, and pim_tensor_grow adds room by pim_alloc'ing the units it needs
+ * and recording them in the tensor's unit table.  Units already written stay where
+ * they are.  Room comes in whole units:
+ *
+ *     along `out`   one unit = nch * nbank * pack outputs   (K: 32 or 64 tokens on ch2)
+ *     along `red`   one chunk = 1024 reductions, ngroups units (V: 1024 tokens)
  *
  * pim_tensor_append() always advances the growth axis, so a caller writes the same
  * call for both and the asymmetry stays here.  And the asymmetry is large, falling
- * straight out of the one formula by which axis is held fixed:
+ * straight out of which axis is held fixed:
  *
  *     OUT_MAJOR  `out` fixed  -> (bank, ch, group) fixed, the reduction run walks
  *                one DRAM row.  ONE CONTIGUOUS TRANSFER per token, as long as
@@ -134,10 +147,18 @@ typedef enum {
 	/* src is [nred][nout].  The V cache, whose new token is a new reduction step
 	 * and therefore a scatter across every bank. */
 	PIM_LAYOUT_RED_MAJOR = 1,
+	/* src is [nout][nred], as OUT_MAJOR, and outputs short enough to share a bank
+	 * row do.  Each output gets `slot` elements of a row — nred rounded up to a
+	 * power of two — and `pack` = 1024 / slot neighbouring outputs sit side by side
+	 * in one row.  Output o then starts o * slot elements into the allocation, so
+	 * consecutive outputs are consecutive on the card.  The K cache of a model whose
+	 * H_kv*D is below 1024; at 1024 and above it places exactly like OUT_MAJOR. */
+	PIM_LAYOUT_OUT_PACKED = 2,
 } pim_layout;
 
 typedef struct {
-	void      *base;       /* PIM_MEM_DRAM, ngroups * nchunks broadcast units    */
+	void      *base;       /* PIM_MEM_DRAM, every unit in one allocation.  NULL
+	                        * for a growable tensor, whose units are in `units`   */
 	pim_layout layout;
 	uint32_t   nout, nred; /* as asked for                                       */
 
@@ -149,8 +170,13 @@ typedef struct {
 	uint32_t   noutpad, nredpad;
 	uint32_t   nchunks;    /* ceil(nredpad / 1024)                               */
 	uint32_t   last_beats; /* beats in the final chunk, 1..64                    */
-	uint32_t   ngroups;    /* noutpad / (nbank * nch)                            */
+	uint32_t   ngroups;    /* noutpad / (nbank * nch): MAC groups, one MAC each  */
 	uint32_t   nch, nbank; /* copied from the geometry it was planned against    */
+
+	/* Outputs per bank row and the elements each owns in it.  pack is 1 and slot
+	 * is 1024 except for an OUT_PACKED tensor with nred under 1024; noutpad is
+	 * then padded to whole rows, nbank * nch * pack outputs. */
+	uint32_t   pack, slot;
 
 	uint64_t   tag;        /* pim_tensor_tag(), stamped on the allocation        */
 
@@ -167,6 +193,15 @@ typedef struct {
 	 * hundred tokens paid all of it for nothing.  Clearing chunk by chunk on first
 	 * entry costs the same in total and only what is used. */
 	uint32_t   zeroed_chunks;
+
+	/* ---- growable storage: used when `growable` is 1, and `base` is then NULL.
+	 * units[u] is where broadcast unit u lives — a host pointer into one of the
+	 * allocations in pages[], which pim_tensor_grow made and pim_tensor_free frees. */
+	uint32_t   growable;
+	uint32_t   nunits, units_cap;
+	void     **units;
+	uint32_t   npages, pages_cap;
+	void     **pages;
 } pim_tensor;
 
 /* ============================== planning ===================================
@@ -190,23 +225,53 @@ const char *pim_tensor_alloc(pim_ctx *c, pim_layout layout,
                              pim_tensor *out);
 void        pim_tensor_free (pim_ctx *c, pim_tensor *t);
 
+/* ============================== growth =====================================
+ * A tensor with no room yet along its growth axis — `out` for OUT_MAJOR and
+ * OUT_PACKED, `red` for RED_MAJOR.  `fixed` is the other axis.  Nothing is
+ * allocated; the first pim_tensor_grow does that. */
+void        pim_tensor_plan_growable(const pim_geometry *g, pim_layout layout,
+                                     uint32_t fixed, pim_tensor *out);
+
+/* Make room for at least `n` along the growth axis.  The missing units are
+ * pim_alloc'd as one allocation, tagged, and appended to the unit table.  Asking for
+ * no more than the tensor has does nothing; on failure the tensor is unchanged. */
+const char *pim_tensor_grow(pim_ctx *c, pim_tensor *t, uint32_t n);
+
+/* Room along the growth axis: what grow has provided, or the planned size. */
+uint32_t    pim_tensor_room(const pim_tensor *t);
+
+/* Units the tensor holds. */
+static inline uint32_t pim_tensor_nunits(const pim_tensor *t)
+{ return t->pack ? t->ngroups / t->pack * t->nchunks : 0; }
+
+/* The host pointer of broadcast unit `u`, however the tensor is stored.  NULL past
+ * the last unit. */
+void       *pim_tensor_unit_addr(const pim_geometry *g, const pim_tensor *t, uint32_t u);
+
 /* ============================== addressing =================================
- * Where M[out][red] sits inside the allocation.
+ * Where M[out][red] sits, as a byte offset into the tensor's units laid end to end.
+ * Unit offset / unit_bytes is where it actually is: pim_tensor_unit_addr() of that
+ * unit, plus the remainder.
  *
  * PUBLIC ON PURPOSE.  This permutation is the part most likely to be wrong and the
  * part a board cannot check cheaply, so a host-only test walks it directly.  Pure
  * arithmetic; touches nothing.
  *
- *     bank(out) = out % nbank     ch(out) = (out/nbank) % nch
- *     group(out) = out / (nbank*nch)      chunk(red) = red / 1024
- *     unit = group * nchunks + chunk
+ *     slot = out % pack           q = out / pack
+ *     bank = q % nbank            ch = (q/nbank) % nch
+ *     group = q / (nbank*nch) * pack + slot           chunk(red) = red / 1024
+ *     unit = pim_tensor_unit(t, group, chunk)
+ *     element in the row = slot * t->slot + red % 1024
+ *
+ * With pack = 1 this is bank = out % nbank, group = out / (nbank*nch) and the
+ * element is red % 1024.
  *
  * Every channel of a supergroup uses the SAME (row, col): the ISA carries one ROW
  * field and CH_MASK is fan-out only, so that part is structural. */
 uint64_t pim_tensor_offset(const pim_geometry *g, const pim_tensor *t,
                            uint32_t out, uint32_t red);
 
-/* Which broadcast unit holds output group `group`'s reduction chunk `chunk`.
+/* Which broadcast unit holds MAC group `group`'s reduction chunk `chunk`.
  *
  * THE ONE PLACE THIS FORMULA LIVES, and that is not tidiness.  It is the contract
  * between where the host PUTS an element (pim_tensor_offset, at upload) and where a
@@ -216,17 +281,44 @@ uint64_t pim_tensor_offset(const pim_geometry *g, const pim_tensor *t,
  * The result is a number, not an error.  Written once, they cannot disagree. */
 static inline uint32_t pim_tensor_unit(const pim_tensor *t, uint32_t group,
                                        uint32_t chunk)
-{ return group * t->nchunks + chunk; }
+{
+	if (t->layout == PIM_LAYOUT_RED_MAJOR)
+		return chunk * (t->ngroups / t->pack) + group / t->pack;
+	return group / t->pack * t->nchunks + chunk;
+}
+
+/* Where MAC group `group` starts inside its row, in elements: the slot it owns.
+ * The program builder adds it to COL.  0 unless several outputs share a row. */
+static inline uint32_t pim_tensor_row_off(const pim_tensor *t, uint32_t group)
+{ return group % t->pack * t->slot; }
+
+/* The output that bank `bank` of channel `ch` computes in MAC group `group`.
+ * Results come back per (group, channel, bank); this puts each one at its place
+ * in output order.  With pack > 1 one MAC covers every pack-th output, and the
+ * pack MAC groups of one row together cover a contiguous range. */
+static inline uint32_t pim_tensor_output(const pim_tensor *t, uint32_t group,
+                                         uint32_t ch, uint32_t bank)
+{ return ((group / t->pack * t->nch + ch) * t->nbank + bank) * t->pack + group % t->pack; }
+
+/* How many MAC groups, from group 0, cover outputs [0, n).  Whole rows take pack
+ * groups each; in a partly filled last row only the slots that hold an output are
+ * computed, so n = 10 with pack 2 takes 2 groups and n = 65 takes 3. */
+static inline uint32_t pim_tensor_groups(const pim_tensor *t, uint32_t n)
+{
+	uint32_t per = t->nch * t->nbank * t->pack, rem = n % per;
+	return n / per * t->pack + (rem < t->pack ? rem : t->pack);
+}
 
 /* A fingerprint of everything that decides where an element goes: the layout, the
- * padded shape, the topology.  Stamped on the allocation by pim_tensor_alloc and
- * compared by pim_prog_lower, so a program built for one arrangement cannot read an
- * allocation filled with another.
+ * padded shape, the topology.  Stamped on the allocation by pim_tensor_alloc (on
+ * every allocation, by pim_tensor_grow) and compared by pim_prog_lower, so a program
+ * built for one arrangement cannot read an allocation filled with another.
  *
- * THE LAYOUT IS MIXED IN EVEN THOUGH THE ADDRESSING DOES NOT DEPEND ON IT.  Two
- * tensors of the same shape and different layouts occupy the same bytes and hold
- * transposed contents; the hardware cannot tell them apart and this is the only
- * thing that can. */
+ * For a growable tensor the size along the growth axis is left out, so the tag does
+ * not change as it grows.  A unit's contents do not depend on that size.
+ *
+ * The layout is mixed in because two tensors of the same shape and different
+ * layouts hold transposed contents, and the hardware cannot tell them apart. */
 uint64_t pim_tensor_tag(const pim_geometry *g, const pim_tensor *t);
 
 /* ============================== filling ====================================
@@ -247,6 +339,9 @@ const char *pim_tensor_upload(pim_ctx *c, pim_tensor *t, const void *src);
  * `first` need not equal t->frontier — a caller re-writing a rejected speculative
  * token appends over it — but appending PAST the frontier with a gap would leave
  * unwritten elements below it, so that is refused.
+ *
+ * It writes within the room the tensor has.  A growable tensor is given more with
+ * pim_tensor_grow first.
  *
  * For RED_MAJOR this clears the reduction chunk `first` lands in, if it has not
  * been cleared before.  That is the zero invariant being established one chunk

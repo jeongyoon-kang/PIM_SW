@@ -13,33 +13,26 @@
 # encoding and the platform conf, which are facts about the board rather than
 # anybody's design.
 #
-# Choose an image ONCE and every tool follows:
-#     ../../scripts/setup.sh --platform ch2
+# The platform comes from platform/config through ../pim_config.h.
 
 CC      ?= gcc
 CFLAGS  ?= -Wall -Wextra -Werror -std=c11 -O2 -g -I..
-# Passed down from scripts/setup.sh.  A probe built without these gets the ch4
-# defaults and links happily against a libhwdef.a built for something else — half
-# stride, wrong bank spacing, and the banner naming the other platform.  These tools
-# drive the board directly, so go through setup.sh.
-override CFLAGS += $(PIM_DEFS)
 LDLIBS  ?= -lm
 
 HWDEF   := ../libhwdef.a
 PROBES  := emu_sanity emu_gpr_loop emu_hbm_direct emu_mc emu_gemv emu_ewmul emu_chain \
-           emu_timing
+           emu_timing emu_aimcmp
 
-.PHONY: all clean
+.PHONY: all clean FORCE
 all: $(PROBES)
 
-# pim_config.h now carries defaults and the real values come as -D, which make cannot
-# see — the file dependency below no longer catches a platform switch on its own.
-# setup.sh cleans before it rebuilds; that is what catches it.
 $(PROBES): %: %.c $(HWDEF) ../emu_regs.h ../pim_platform.h ../pim_config.h
 	$(CC) $(CFLAGS) -o $@ $< $(HWDEF) $(LDLIBS)
 
-$(HWDEF):
-	$(MAKE) -C ..
+# Always descend: hwdef/ regenerates pim_config.h and rebuilds libhwdef.a if it changed.
+$(HWDEF): FORCE
+	$(MAKE) -C .. libhwdef.a
+../pim_config.h: $(HWDEF) ;
 
 clean:
 	rm -f $(PROBES)

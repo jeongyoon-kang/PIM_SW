@@ -318,6 +318,19 @@ static int put_vector(uint32_t word, float v, unsigned L)
     return gpr_write(word, vec, L);
 }
 
+// TWO VECTORS, BACK TO BACK, in one GPR run: beats [0,L) hold v0 and [L,2L) hold
+// v1.  One WRVEC of 2L beats then loads both into the GB, which is what makes the
+// read-pointer question answerable.
+static int put_vector2(uint32_t word, float v0, float v1, unsigned L)
+{
+    uint16_t vec[2 * EMU_MAX_OPSIZE * EMU_LANES_PER_WORD];
+    for (unsigned k = 0; k < L * EMU_LANES_PER_WORD; k++) {
+        vec[k]                             = emu_f32_to_bf16(v0);
+        vec[k + L * EMU_LANES_PER_WORD]    = emu_f32_to_bf16(v1);
+    }
+    return gpr_write(word, vec, 2 * L);
+}
+
 // ---- reporting ----------------------------------------------------------------
 // Prints all 16 lanes and returns the number that are wrong.  On a mismatch it
 // says what the value WOULD have been under the alternative hypothesis, because
@@ -439,6 +452,107 @@ static unsigned probe_rewind(unsigned row, unsigned L, unsigned val,
     unsigned bad = judge("rewind (1st)", r.lane[0], want, NULL, NULL);
     printf("  second MAC — the one that needs the GB to have rewound:\n");
     bad += judge("rewind (2nd)", r.lane[1], want, NULL, NULL);
+    return bad;
+}
+
+// B2. IS THE GB READ POINTER REWOUND TO ZERO PER MAC, OR DOES IT WRAP AT THE WRITE
+//     POINTER?  The rewind probe above cannot tell: it loads exactly as many beats
+//     as one MAC consumes, so "back to beat 0" and "wrap at beat L" are the same
+//     place and both hypotheses predict the same answer.
+//
+//     THE v2.0 ISR GUIDE SAYS WRAP (§2.4: "읽기 포인터가 write 포인터에서 저절로
+//     순환").  If that is what the hardware does, a single WRVEC can pack several
+//     vectors and successive MACs consume them in turn -- which is exactly what
+//     attention wants for its heads, with no new ISR field.
+//
+//     WRVEC(2L beats: [0,L) = 1.0, [L,2L) = 3.0)
+//       | MAC(L) | RD_MAC(w0) | MAC(L) | RD_MAC(w1) | EOS
+//
+//     rewound to 0   ->  w1 == w0        both MACs saw the 1.0 half
+//     wrapped at 2L  ->  w1 == 3 * w0    the second MAC saw the 3.0 half
+//
+//     RD_MAC is read-clear, so each MAC's sum stands alone and the ratio is the
+//     whole answer.  3.0 rather than 2.0 so that a wrapped result cannot be
+//     confused with an accumulation that failed to clear.
+static unsigned probe_gbwrap(unsigned row, unsigned L, unsigned val,
+                             uint32_t vec_word, uint32_t dst_word)
+{
+    printf("\n=== gbwrap — is the GB read pointer rewound, or does it wrap? ===\n");
+    if (2 * L > EMU_MAX_OPSIZE) {
+        printf("    SKIPPED: 2*L = %u beats and the GB holds %u\n",
+               2 * L, EMU_MAX_OPSIZE);
+        return 0;
+    }
+    printf("    WRVEC(%u beats: [0,%u)=1.0  [%u,%u)=3.0) | MAC(%u) | RD_MAC(w%u)"
+           " | MAC(%u) | RD_MAC(w%u) | EOS\n",
+           2 * L, L, L, 2 * L, L, dst_word, L, dst_word + 1);
+    printf("    rewound -> w1 == w0.   wrapped -> w1 == 3 * w0.\n");
+
+    struct emu_isr prog[6];
+    struct emu_isr_spec s;
+    const char *e;
+    s = emu_isr_default_ch(ISR_OP_WRVEC, 1u << g_ch);  s.opsize = 2 * L; s.row = vec_word;
+    if ((e = emu_isr_build(&prog[0], &s))) { fprintf(stderr, "WRVEC: %s\n", e); return ~0u; }
+    s = emu_isr_default_ch(ISR_OP_MAC, 1u << g_ch);    s.opsize = L; s.row = row; s.col = 0;
+    s.pu_mask = 0xFFFF; s.gb_mc_mask = 0xFFFF;
+    if ((e = emu_isr_build(&prog[1], &s))) { fprintf(stderr, "MAC: %s\n", e); return ~0u; }
+    s = emu_isr_default_ch(ISR_OP_RD_MAC, 1u << g_ch); s.opsize = 0; s.row = dst_word;
+    if ((e = emu_isr_build(&prog[2], &s))) { fprintf(stderr, "RD_MAC: %s\n", e); return ~0u; }
+    prog[3] = prog[1];
+    s = emu_isr_default_ch(ISR_OP_RD_MAC, 1u << g_ch); s.opsize = 0; s.row = dst_word + 1;
+    if ((e = emu_isr_build(&prog[4], &s))) { fprintf(stderr, "RD_MAC: %s\n", e); return ~0u; }
+    s = emu_isr_default_ch(ISR_OP_EOS, 1u << g_ch);
+    if ((e = emu_isr_build(&prog[5], &s))) { fprintf(stderr, "EOS: %s\n", e); return ~0u; }
+
+    if (put_weights(row, val, L) < 0) return ~0u;
+    if (put_vector2(vec_word, 1.0f, 3.0f, L) < 0) return ~0u;
+
+    struct run_result r = { .lane = g_lane };
+    if (run_program(prog, 6, dst_word, 2, &r) < 0) return ~0u;
+    printf("    ran %" PRIu64 " us, %u polls, %u reads, done=%u\n",
+           r.us, r.polls, r.reads, r.seen_done);
+    if (!r.landed) { printf("    FAIL: a result word never landed\n"); return ~0u; }
+
+    uint16_t w_rew[EMU_NBANKS], w_wrap[EMU_NBANKS];
+    for (unsigned b = 0; b < EMU_NBANKS; b++) {
+        w_rew[b]  = expect_one(b, val, 1.0f, L);
+        w_wrap[b] = expect_one(b, val, 3.0f, L);
+    }
+    printf("  first MAC (must be the 1.0 half under either hypothesis):\n");
+    unsigned bad = judge("gbwrap (1st)", r.lane[0], w_rew, NULL, NULL);
+
+    // The verdict.  Counted against BOTH hypotheses rather than asserted against
+    // one, because the interesting outcome is whichever it is -- and a third
+    // answer (neither) is the one that must not pass quietly.
+    unsigned as_rew = 0, as_wrap = 0;
+    for (unsigned b = 0; b < EMU_NBANKS; b++) {
+        if (r.lane[1][b] == w_rew[b])  as_rew++;
+        if (r.lane[1][b] == w_wrap[b]) as_wrap++;
+    }
+    printf("  second MAC — THE VERDICT:\n");
+    printf("    lane | rewound (1x)    | wrapped (3x)    | got             |\n");
+    printf("    -----+-----------------+-----------------+-----------------+\n");
+    for (unsigned b = 0; b < EMU_NBANKS; b++)
+        printf("     %2u  | %8.0f 0x%04x | %8.0f 0x%04x | %8.0f 0x%04x | %s\n", b,
+               (double)emu_bf16_to_f32(w_rew[b]),  w_rew[b],
+               (double)emu_bf16_to_f32(w_wrap[b]), w_wrap[b],
+               (double)emu_bf16_to_f32(r.lane[1][b]), r.lane[1][b],
+               r.lane[1][b] == w_rew[b]  ? "rewound" :
+               r.lane[1][b] == w_wrap[b] ? "WRAPPED" : "neither");
+    printf("\n    %u/%u lanes match REWOUND, %u/%u match WRAPPED\n",
+           as_rew, EMU_NBANKS, as_wrap, EMU_NBANKS);
+    if (as_rew == EMU_NBANKS)
+        printf("    VERDICT: the GB read pointer REWINDS to 0 at every MAC.  One WRVEC\n"
+               "             cannot hold two vectors; packing heads needs a new field.\n");
+    else if (as_wrap == EMU_NBANKS)
+        printf("    VERDICT: the GB read pointer WRAPS AT THE WRITE POINTER.  One WRVEC\n"
+               "             can pack several vectors and successive MACs consume them\n"
+               "             in turn -- head packing works with no new ISR field.\n");
+    else {
+        printf("    VERDICT: NEITHER.  The read pointer does something else; do not\n"
+               "             build on either model.\n");
+        bad += EMU_NBANKS;
+    }
     return bad;
 }
 
@@ -1196,13 +1310,15 @@ static unsigned probe_split(unsigned row, unsigned L, unsigned G, unsigned C,
 static void usage(const char *p)
 {
     fprintf(stderr,
-"Usage: %s [--ch N] [--test chain|rewind|kchunk|gemv|all]\n"
+"Usage: %s [--ch N] [--test chain|rewind|gbwrap|kchunk|gemv|all]\n"
 "       [--l N] [--g N] [--row N] ...\n"
 "\n"
 "Probes the four composition rules a multi-ISR program depends on:\n"
 "\n"
 "  chain    MAC | MAC | RD_MAC        does the accumulator survive between ISRs?\n"
 "  rewind   MAC | RD_MAC | MAC | ...  does ONE WRVEC feed more than one MAC?\n"
+"  gbwrap   WRVEC(2L) | MAC(L) | MAC(L)    rewound to 0, or wrapped at the write\n"
+"           pointer?  rewind cannot tell -- it loads exactly one MAC's worth\n"
 "  kchunk   WRVEC|MAC|WRVEC|MAC|...   a dot product split in two — what K>1024 needs\n"
 "  gemv     WRVEC then G x {MAC,RD}   the whole kernel in one doorbell\n"
 "  acc      terms below half an ulp     how WIDE is the accumulator, on THIS device?\n"
@@ -1307,12 +1423,14 @@ int main(int argc, char **argv)
     bool all    = !strcmp(test, "all");
     bool t_ch   = all || !strcmp(test, "chain");
     bool t_rw   = all || !strcmp(test, "rewind");
+    bool t_gw   = all || !strcmp(test, "gbwrap");
     bool t_kc   = all || !strcmp(test, "kchunk");
     bool t_gv   = all || !strcmp(test, "gemv");
     bool t_or   = all || !strcmp(test, "order");
     bool t_ac   = all || !strcmp(test, "acc");
     bool t_sp   = !strcmp(test, "split");           // opt-in: needs --kchunks >= 2
-    if (!t_ch && !t_rw && !t_kc && !t_gv && !t_or && !t_ac && !t_sp) { usage(argv[0]); return 2; }
+    if (!t_ch && !t_rw && !t_gw && !t_kc && !t_gv && !t_or && !t_ac && !t_sp) {
+        usage(argv[0]); return 2; }
 
     char path[256];
     snprintf(path, sizeof path, "/sys/bus/pci/devices/%s/resource2", bdf);
@@ -1338,20 +1456,34 @@ int main(int argc, char **argv)
            L, L * EMU_LANES_PER_WORD, row);
 
     if (!require_idle("start", 1000)) return 1;
-    const struct { uint32_t off; uint8_t v; } TM[] = {
-        { CFR_T_FAW, 30 }, { CFR_T_RRD, 6 }, { CFR_T_RCD, 4 }, { CFR_T_CCD, 2 },
-        { CFR_T_RTP, 3 },  { CFR_T_RP,  3 }, { CFR_T_WR,  4 }, { CFR_T_RAS, 6 },
-    };
-    for (unsigned i = 0; i < 8; i++) cfr_wr(TM[i].off, TM[i].v);
-    for (unsigned i = 0; i < 8; i++)
-        if (cfr_rd(TM[i].off) != TM[i].v) { fprintf(stderr, "timing readback failed\n"); return 1; }
-    printf("  timing set and verified\n");
+    // Reads the timing registers that emu_sanity or emu_timing set, and prints them.
+    // T_CCD below 2 halves every MAC result, so the run stops there.
+    {
+        static const struct { const char *name; uint32_t off; } TM[] = {
+            { "faw", CFR_T_FAW }, { "rrd", CFR_T_RRD }, { "rcd", CFR_T_RCD },
+            { "ccd", CFR_T_CCD }, { "rtp", CFR_T_RTP }, { "rp",  CFR_T_RP  },
+            { "wr",  CFR_T_WR  }, { "ras", CFR_T_RAS }, { "mod", CFR_T_MOD },
+            { "rpab", CFR_T_RP_AB }, { "gb", CFR_T_GB },
+        };
+        printf("  timing :");
+        for (unsigned i = 0; i < sizeof TM / sizeof TM[0]; i++)
+            printf(" %s=%u", TM[i].name, cfr_rd(TM[i].off) & CFR_TIMING_MAX);
+        printf("\n");
+        uint32_t ccd = cfr_rd(CFR_T_CCD) & CFR_TIMING_MAX;
+        if (ccd < 2) {
+            fprintf(stderr, "ERROR: T_CCD is %u; below 2 every MAC result is halved\n", ccd);
+            return 1;
+        }
+    }
 
     unsigned fails = 0, ran = 0;
     unsigned rc;
     if (t_ch) { rc = probe_chain(row, L, val, vec_word, dst_word);
                 ran++; if (rc) fails++; }
     if (t_rw) { rc = probe_rewind(row + 1, L, val, vec_word, dst_word + 8);
+                ran++; if (rc) fails++; }
+    if (t_gw) { rc = probe_gbwrap(row + 1, L, val, vec_word + 2 * EMU_MAX_OPSIZE,
+                                 dst_word + 10);
                 ran++; if (rc) fails++; }
     if (t_kc) { rc = probe_kchunk(row + 2, row + 3, L, val, val + 32,
                                   vec_word, vec_word + EMU_MAX_OPSIZE, dst_word + 16);

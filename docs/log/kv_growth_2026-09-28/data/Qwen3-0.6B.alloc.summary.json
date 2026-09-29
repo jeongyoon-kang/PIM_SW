@@ -1,0 +1,26 @@
+{
+ "model": "Qwen/Qwen3-0.6B",
+ "mode": "alloc",
+ "layers": 28,
+ "kv_width": 1024,
+ "weights_bytes": 1191968768,
+ "capacity": 8589934592,
+ "memory_max_tokens": 64480,
+ "model_max_position": 40960,
+ "max_tokens": 40960,
+ "max_tokens_limit": "model context",
+ "kv_bytes_1024": 117440512,
+ "load_seconds": 21.653293341980316,
+ "started": "2026-09-28 18:16:07",
+ "stop": {
+  "token": 64481,
+  "error": "layer 16: no card memory for a K page at token 64481 (K holds 64480): pim_tensor_grow: 1 unit(s) of 64 KiB for room 64512: the dram pool has no room for 1 granule(s) of 64 KiB"
+ },
+ "last_token_ok": 64480,
+ "events": 58200,
+ "seconds": 1.435642973985523,
+ "dram_allocated": 8589934592,
+ "dram_pooled": 0,
+ "hugepages_held": 4096,
+ "finished": "2026-09-28 18:16:09"
+}

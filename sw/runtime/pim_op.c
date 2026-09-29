@@ -73,6 +73,7 @@ struct pim_rt {
     uint32_t  max_launch_groups;
 
     uint16_t *vbuf;      /* host staging: padded vector, then result words   */
+    size_t    vbuf_bytes; /* vbuf's size: the longest vector staged so far   */
     uint16_t *ybuf;
 
     pim_isr  *lisr;      /* pass 1 storage                                   */
@@ -94,6 +95,7 @@ struct pim_rt {
     struct pim_piece {
         uint16_t *y;           /* where the caller wants the answer         */
         uint32_t  out_count;
+        pim_tensor m;          /* its layout, to put each result in place   */
         uint32_t  yword;       /* words into ygpr this piece's results land  */
     } *piece;
     uint32_t  npiece;
@@ -215,9 +217,11 @@ const char *pim_rt_open(pim_ctx *c, const pim_rt_config *cfg, pim_rt **out)
     r->latom_cap = isr_bound / 2u + 2u;
 
     // vbuf stages ONE piece at a time (the upload happens inside add_one, before
-    // the next piece is touched), so it does not scale with max_batch.  ybuf holds
-    // the whole program's results, read back in one pread at submit, so it does.
-    r->vbuf  = malloc((size_t)redpad * 2);
+    // the next piece is touched), so it does not scale with max_batch; add_one grows
+    // it for a longer vector.  ybuf holds the whole program's results, read back in
+    // one pread at submit, so it does scale.
+    r->vbuf_bytes = (size_t)redpad * 2;
+    r->vbuf  = malloc(r->vbuf_bytes);
     r->ybuf  = malloc(r->ybytes);
     r->lisr  = malloc((size_t)r->lisr_cap  * sizeof *r->lisr);
     r->lref  = malloc((size_t)r->lref_cap  * sizeof *r->lref);
@@ -352,14 +356,19 @@ const char *pim_op_submit(pim_rt *r)
 
     for (uint32_t k = 0; k < r->npiece; k++) {
         const struct pim_piece *pc = &r->piece[k];
-        // Word (group, channel), lane b -> output group*nch*nbank + ch*nbank + b.
-        // The inverse of pim_tensor_offset's output mapping, written from the same
-        // three lines so the two cannot drift.
+        uint32_t nout = pc->out_count * g->nch * g->nbank;
+        // Word (group, channel), lane b goes to the output pim_tensor_output names.
+        // The piece starts on a whole row, so its groups number from 0 here.  When
+        // the last row is only partly asked for, the lanes that land past the
+        // caller's buffer belong to outputs it did not ask for and are dropped.
         for (uint32_t sg = 0; sg < pc->out_count; sg++)
             for (uint32_t ch = 0; ch < g->nch; ch++)
-                for (uint32_t b = 0; b < g->nbank; b++)
-                    pc->y[(sg * g->nch + ch) * g->nbank + b] =
-                        r->ybuf[(pc->yword + sg * g->nch + ch) * ELEMS_PER_BEAT + b];
+                for (uint32_t b = 0; b < g->nbank; b++) {
+                    uint32_t o = pim_tensor_output(&pc->m, sg, ch, b);
+                    if (o < nout)
+                        pc->y[o] = r->ybuf[(pc->yword + sg * g->nch + ch)
+                                           * ELEMS_PER_BEAT + b];
+                }
     }
     mark(&r->stat.unpack_us, t);
     r->npiece = 0;
@@ -377,11 +386,26 @@ static const char *add_one(pim_rt *r, const pim_tensor *m,
     uint32_t beats, redpad, vwords, ywords, want_isr;
     const char *bad;
 
+    // Checked before the caller's vector is read: `v` holds red_len elements only if
+    // the call is well formed, and a refused call must not read past it.
+    if ((uint64_t)red_off + red_len > m->nredpad)
+        return fail(r, "reduction [%u, %u) runs past the %u elements this tensor has "
+                       "on its reduction axis", red_off, red_off + red_len, m->nredpad);
+
     beats  = pim_matvec_beats(red_off, red_len);
     redpad = beats * ELEMS_PER_BEAT;
     vwords = beats;                               /* one GPR word is one beat */
     ywords = out_count * g->nch;
 
+    // The vector is zero-padded in vbuf before it goes to the GPR.  vbuf starts at
+    // max_red and grows to the longest vector seen; the GPR buffer does not grow.
+    if ((size_t)redpad * 2 > r->vbuf_bytes) {
+        uint16_t *nb = realloc(r->vbuf, (size_t)redpad * 2);
+        if (!nb)
+            return fail(r, "out of host memory staging a %u-element vector", redpad);
+        r->vbuf = nb;
+        r->vbuf_bytes = (size_t)redpad * 2;
+    }
     if ((size_t)redpad * 2 > r->vbytes)
         return fail(r, "red_len %u rounds to %u elements (%zu B), past the %zu B "
                        "this rt reserved in GPR for a vector",
@@ -438,6 +462,7 @@ static const char *add_one(pim_rt *r, const pim_tensor *m,
 
         r->piece[r->npiece].y         = y;
         r->piece[r->npiece].out_count = out_count;
+        r->piece[r->npiece].m         = *m;
         r->piece[r->npiece].yword     = r->yword_used;
         r->npiece++;
         r->vword_used += vwords;
@@ -464,10 +489,16 @@ const char *pim_op_add(pim_rt *r, const pim_tensor *m,
     // holds 16383 instructions, so a piece this wide cannot be one program — but a
     // supergroup owns its accumulators from its first MAC to its RD_MAC, and cutting
     // inside that strands a running sum in a latch across a doorbell.
+    // A packed tensor's MAC groups share bank rows pack at a time, and a piece
+    // has to start on a row so its results can be put back in order.
+    if (out_first % m->pack)
+        return fail(r, "pim_op_add: out_first %u is not a multiple of %u, the MAC "
+                       "groups that share one bank row", out_first, m->pack);
     gpl = groups_per_launch(r, red_off, red_len, r->bmode, out_count);
+    if (gpl < out_count) gpl -= gpl % m->pack;
     if (!gpl)
-        return fail(r, "not even one supergroup fits in %u ISRs at red_len %u",
-                    pim_exec_max_isrs(r->exec), red_len);
+        return fail(r, "not even one bank row of %u MAC group(s) fits in %u ISRs "
+                       "at red_len %u", m->pack, pim_exec_max_isrs(r->exec), red_len);
 
     for (uint32_t g0 = 0; g0 < out_count; g0 += gpl) {
         uint32_t ng = out_count - g0 < gpl ? out_count - g0 : gpl;

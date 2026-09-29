@@ -23,6 +23,7 @@
 #include <pybind11/stl.h>
 
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -45,13 +46,15 @@ static pim_ctx *ctx()
     if (!c)
         throw std::runtime_error(std::string("cannot open the PIM device: ")
                                  + pim_last_error()
-                                 + "\n  is pim.ko loaded?  sudo make -C sw/drv load CH=2");
+                                 + "\n  is pim.ko loaded?  sudo make -C sw/drv load");
     return c;
 }
 
 // ---------------------------------------------------------------- Tensor ------
 // Owns its allocation.  Freed on __del__ or .free(); a tensor that outlives the
 // interpreter is the process exiting, which frees the card memory anyway.
+struct Growable {};
+
 struct Tensor {
     pim_tensor t{};
     bool live = false;
@@ -60,6 +63,25 @@ struct Tensor {
     {
         ck(pim_tensor_alloc(ctx(), (pim_layout)layout, nout, nred, aflags, &t));
         live = true;
+    }
+
+    // A KV tensor: no room along its growth axis until grow() gives it some.
+    Tensor(int layout, uint32_t fixed, Growable)
+    {
+        ctx();
+        pim_tensor_plan_growable(pim_geom(), (pim_layout)layout, fixed, &t);
+        if (!t.growable) throw std::runtime_error("growable: the fixed axis must be nonzero");
+        live = true;
+    }
+
+    // Room for at least `n` along the growth axis.  Returns the units it allocated,
+    // 0 when the tensor already had the room.
+    uint32_t grow(uint32_t n)
+    {
+        check();
+        uint32_t before = pim_tensor_nunits(&t);
+        ck(pim_tensor_grow(ctx(), &t, n));
+        return pim_tensor_nunits(&t) - before;
     }
     ~Tensor() { free_(); }
 
@@ -91,7 +113,7 @@ struct Tensor {
     void append(uint32_t first, uint32_t count, uintptr_t src, size_t nelem)
     {
         check();
-        uint32_t other = (t.layout == PIM_LAYOUT_OUT_MAJOR) ? t.nred : t.nout;
+        uint32_t other = (t.layout == PIM_LAYOUT_RED_MAJOR) ? t.nout : t.nred;
         size_t want = (size_t)count * other;
         if (nelem != want)
             throw std::runtime_error("append: " + std::to_string(nelem)
@@ -103,6 +125,9 @@ struct Tensor {
     void truncate(uint32_t pos) { check(); ck(pim_tensor_truncate(ctx(), &t, pos)); }
 
     size_t bytes() const { return pim_tensor_bytes(pim_geom(), &t); }
+
+    // MAC groups that cover outputs [0, n); see pim_tensor_groups.
+    uint32_t groups(uint32_t n) const { return pim_tensor_groups(&t, n); }
 };
 
 // --------------------------------------------------------------- Runtime ------
@@ -208,6 +233,7 @@ PYBIND11_MODULE(_pim, m)
 
     m.attr("OUT_MAJOR") = (int)PIM_LAYOUT_OUT_MAJOR;
     m.attr("RED_MAJOR") = (int)PIM_LAYOUT_RED_MAJOR;
+    m.attr("OUT_PACKED") = (int)PIM_LAYOUT_OUT_PACKED;
     m.attr("ACC_SINGLE") = (int)PIM_ACC_SINGLE;
     m.attr("ACC_DUAL") = (int)PIM_ACC_DUAL;
     m.attr("ALLOC_ZERO") = (unsigned)PIM_ALLOC_F_ZERO;
@@ -228,6 +254,14 @@ PYBIND11_MODULE(_pim, m)
     py::class_<Tensor>(m, "Tensor")
         .def(py::init<int, uint32_t, uint32_t, unsigned>(),
              py::arg("layout"), py::arg("nout"), py::arg("nred"), py::arg("flags") = 0)
+        .def_static("growable", [](int layout, uint32_t fixed) {
+            return std::unique_ptr<Tensor>(new Tensor(layout, fixed, Growable{}));
+        }, py::arg("layout"), py::arg("fixed"))
+        .def("grow", &Tensor::grow, py::arg("n"))
+        .def_property_readonly("room", [](const Tensor &t) { return pim_tensor_room(&t.t); })
+        .def_property_readonly("nunits", [](const Tensor &t) { return pim_tensor_nunits(&t.t); })
+        .def_property_readonly("npages", [](const Tensor &t) { return t.t.npages; })
+        .def_property_readonly("is_growable", [](const Tensor &t) { return t.t.growable != 0; })
         .def("upload", &Tensor::upload, py::arg("ptr"), py::arg("nelem"))
         .def("append", &Tensor::append, py::arg("first"), py::arg("count"),
              py::arg("ptr"), py::arg("nelem"))
@@ -241,11 +275,15 @@ PYBIND11_MODULE(_pim, m)
         .def_property_readonly("nchunks", [](const Tensor &t) { return t.t.nchunks; })
         .def_property_readonly("frontier", [](const Tensor &t) { return t.t.frontier; })
         .def_property_readonly("layout", [](const Tensor &t) { return (int)t.t.layout; })
+        .def_property_readonly("pack", [](const Tensor &t) { return t.t.pack; })
+        .def("groups", &Tensor::groups, py::arg("n"))
         .def_property_readonly("bytes", &Tensor::bytes)
         .def("__repr__", [](const Tensor &t) {
             return "<pim.Tensor [" + std::to_string(t.t.nout) + " x "
                  + std::to_string(t.t.nred) + "] "
-                 + (t.t.layout == PIM_LAYOUT_OUT_MAJOR ? "OUT_MAJOR" : "RED_MAJOR")
+                 + (t.t.layout == PIM_LAYOUT_OUT_MAJOR ? "OUT_MAJOR"
+                    : t.t.layout == PIM_LAYOUT_RED_MAJOR ? "RED_MAJOR"
+                    : "OUT_PACKED x" + std::to_string(t.t.pack))
                  + " " + std::to_string(t.bytes() >> 10) + " KiB"
                  + (t.live ? "" : " FREED") + ">";
         });

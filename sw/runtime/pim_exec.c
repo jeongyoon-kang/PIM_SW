@@ -124,22 +124,31 @@ static const char *require_idle(pim_exec *e, const char *what)
 // The struct's field order, the register order, and this array are one list.  They
 // are contiguous 4-byte registers from CFR_T_FAW, so a loop over the struct's bytes
 // and a loop over the offsets stay in step by construction.
-const char *const pim_timing_names[8] =
-    { "faw", "rrd", "rcd", "ccd", "rtp", "rp", "wr", "ras" };
+const char *const pim_timing_names[PIM_TIMING_NREG] =
+    { "faw", "rrd", "rcd", "ccd", "rtp", "rp", "wr", "ras", "mod", "rpab" };
 
-static uint8_t *timing_field(pim_timing *t, unsigned i)
-{ return &((uint8_t *)t)[i]; }        // the struct is eight uint8_t, in order
+// NOT EIGHT IN A ROW ANY MORE.  v2.0 put T_MOD and T_RP_AB above PROG_LEN and
+// RUN_CYC, so the offsets need a table; the index into it is the struct's field
+// order, which is what keeps the loop below a loop.
+static const uint32_t pim_timing_off[PIM_TIMING_NREG] = {
+    CFR_T_FAW, CFR_T_RRD, CFR_T_RCD, CFR_T_CCD, CFR_T_RTP,
+    CFR_T_RP,  CFR_T_WR,  CFR_T_RAS, CFR_T_MOD, CFR_T_RP_AB,
+};
 
-_Static_assert(sizeof(pim_timing) == 8, "pim_timing must stay eight packed bytes");
+static uint16_t *timing_field(pim_timing *t, unsigned i)
+{ return &((uint16_t *)t)[i]; }       // ten uint16_t, in declaration order
+
+_Static_assert(sizeof(pim_timing) == 2 * PIM_TIMING_NREG,
+               "pim_timing must stay ten packed uint16_t");
 
 const char *pim_exec_get_timing(pim_exec *e, pim_timing *out)
 {
     if (!e || !out) return "pim_exec_get_timing: null argument";
-    for (unsigned i = 0; i < 8; i++) {
-        uint32_t v = cfr_rd(e, CFR_T_FAW + i * 4u);
+    for (unsigned i = 0; i < PIM_TIMING_NREG; i++) {
+        uint32_t v = cfr_rd(e, pim_timing_off[i]);
         if (v == 0xFFFFFFFFu)
             return ex_err(e, "the CFR reads all-ones: the device is not answering");
-        *timing_field(out, i) = (uint8_t)v;
+        *timing_field(out, i) = (uint16_t)(v & CFR_TIMING_MAX);
     }
     return NULL;
 }

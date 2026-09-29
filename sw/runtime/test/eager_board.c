@@ -214,8 +214,9 @@ int main(int argc, char **argv)
     for (unsigned ch = 0; ch < g->nch; ch++) {
         pim_viol v;
         if (!pim_exec_violation_detail(e, ch, &v))
-            printf("  ch%u  rcd_rd %u  ccd_rd %u  ccd_wr %u  recovery_wr %u\n",
-                   ch, v.rcd_rd, v.ccd_rd, v.ccd_wr, v.recovery_wr);
+            printf("  ch%u  act_fill %u (worst +%u)  pre_drain %u (worst +%u)\n",
+                   ch, v.act_fill, v.worst_act_fill,
+                   v.pre_drain, v.worst_pre_drain);
     }
 
     pim_free_ctx(c, xg); pim_free_ctx(c, yg);

@@ -78,16 +78,8 @@ static pim_geometry mk(uint32_t nch)
 
 static pim_tensor mkw(const pim_geometry *g, uint32_t groups, uint32_t k)
 {
-    pim_tensor w = {0};
-    w.nout = g->nbank * g->nch * groups;
-    w.noutpad = w.nout;
-    w.nred = k;
-    w.nredpad = (k + 15) / 16 * 16;
-    w.nchunks = (w.nredpad + 1023) / 1024;
-    w.last_beats = (w.nredpad - (w.nchunks - 1) * 1024) / 16;
-    w.ngroups = groups;
-    w.nch = g->nch;
-    w.nbank = g->nbank;
+    pim_tensor w;
+    pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, g->nbank * g->nch * groups, k, &w);
     return w;
 }
 
@@ -475,21 +467,24 @@ int main(int argc, char **argv)
         }
     }
 
-    // ROUTINE VERSUS NOT.  RCD_RD is the timing model reporting that the memory was
-    // slower than its allowance, and RECOVERY_WR comes from the MC write path — both
-    // are expected here and neither touches the answer [measured 2026-08-21; see
-    // pim_timing in pim_exec.h].  CCD_WR and ewmul_drop are not expected at all, so
-    // they are the ones worth failing on.
+    // ROUTINE VERSUS NOT, under v2.0's two kinds.  ACT_FILL is the memory reporting
+    // that filling a row buffer took longer than T_RCD allowed; on an open-page
+    // image the FIRST touch of a row does that and a repeat does not [measured
+    // 2026-09-23: row 7777 first run 32 of 32 banks, same row again 0].  It is
+    // routine and it does not touch the answer.
+    //
+    // PRE_DRAIN IS NOT ROUTINE HERE.  These kernels never write DRAM -- WRVEC and
+    // COPY land in the GB, MAC and RD_MAC are reads -- so the only precharge is
+    // EOS's flush of rows nothing dirtied.  If that overruns, the all-bank budget
+    // (T_RP_AB) is set too low and the timing model is not being reproduced.
     for (uint32_t ch = 0; ch < pim_geom_ctx(c)->nch; ch++) {
         pim_viol v;
         if (pim_exec_violation_detail(e, ch, &v)) continue;
-        printf("  ch%u violations: RCD_RD %u (worst overrun %u cy), RECOVERY_WR %u, "
-               "CCD_RD %u  [routine]\n", ch, v.rcd_rd, v.worst_rcd_rd,
-               v.recovery_wr, v.ccd_rd);
-        CHECK(!v.ccd_wr, "ch%u raised %u CCD_WR violation(s), which nothing here "
-              "should do", ch, v.ccd_wr);
-        CHECK(!(v.sticky & (1u << 8)), "ch%u dropped an EWMUL, which nothing here "
-              "should issue", ch);
+        printf("  ch%u violations: ACT_FILL %u (worst overrun %u cy)  [routine]\n",
+               ch, v.act_fill, v.worst_act_fill);
+        CHECK(!v.pre_drain, "ch%u raised %u PRE_DRAIN violation(s) (worst +%u cy); "
+              "nothing here dirties a row, so T_RP_AB is too low", ch, v.pre_drain,
+              v.worst_pre_drain);
     }
 
     pim_exec_close(e);

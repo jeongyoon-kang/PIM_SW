@@ -68,16 +68,37 @@ def resolve_shape(name: str):
     return B.ModelShape.from_hf_config(cfg, name), "transformers config"
 
 
+def cached_models_help() -> str:
+    """The models in the local Hugging Face cache, for the end of -h."""
+    try:
+        from huggingface_hub import scan_cache_dir
+        repos = [r for r in scan_cache_dir().repos if r.repo_type == "model"]
+    except ImportError:
+        return "cached models: (huggingface_hub is not installed)"
+    except Exception as e:                                  # no cache dir yet, unreadable
+        return f"cached models: (could not scan the cache: {e})"
+    if not repos:
+        return "cached models: none"
+    lines = ["cached models (use as --model):"]
+    for r in sorted(repos, key=lambda r: r.repo_id):
+        lines.append(f"  {r.repo_id:<40} {r.size_on_disk_str:>7}")
+    return "\n".join(lines)
+
+
+class _Parser(argparse.ArgumentParser):
+    def format_help(self) -> str:
+        # Scanned here so only -h pays for it.
+        self.epilog = cached_models_help()
+        return super().format_help()
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = _Parser(description=__doc__,
+                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="llama-3.2-1b",
                     help="a built-in shape (llama-3.2-1b / -3b) or a HF model id")
     ap.add_argument("--prompt", default="Walk me through SSD architecture.")
-    ap.add_argument("--max-new-tokens", type=int, default=1024)
-    ap.add_argument("--s-max", type=int, default=8192,
-                    help="context to reserve KV for.  pim_tensor does not grow, so "
-                         "this is what closes the budget")
+    ap.add_argument("--max-new-tokens", type=int, default=4096)
     ap.add_argument("--ch", type=int, default=None,
                     help="report against an N-channel image instead of the one "
                          "that is loaded")
@@ -123,14 +144,13 @@ def main() -> int:
         print(f"\nERROR: {how}", file=sys.stderr)
         return 2
     print(f"\n=== placement (shape from {how}) ===")
-    plan = B.plan(g, shape, args.s_max)
+    plan = B.plan(g, shape)
     print(plan.report())
 
     if args.dry_run:
         return 0 if plan.fits else 1
     if not plan.fits:
-        print("\nRefusing to run: the model does not fit and would fail partway "
-              "through loading.  Lower --s-max, or use --dry-run to explore.",
+        print("\nRefusing to run: the weights do not fit on this image.",
               file=sys.stderr)
         return 1
 
@@ -150,7 +170,7 @@ def main() -> int:
               "card.\n           RMSNorm, RoPE, SiLU, softmax and the embedding "
               "lookup stay on the host;\n           see pimllm/model.py for why "
               "each one does.")
-        m = PimModel(hf_id, s_max=args.s_max, geometry=g, verbose=True)
+        m = PimModel(hf_id, geometry=g, verbose=True)
         # The streamer prints each token as it lands, then the joined text and the
         # rate; a second print here would only repeat it.
         print(f"\n  prompt: {args.prompt!r}")

@@ -49,9 +49,9 @@ def torch_logits(hf_id: str, prompt: str):
     return out.logits[0, -1].float(), ids
 
 
-def pim_logits(hf_id: str, prompt: str, s_max: int):
+def pim_logits(hf_id: str, prompt: str):
     from pimllm.model import PimModel
-    m = PimModel(hf_id, s_max=s_max, verbose=False)
+    m = PimModel(hf_id, verbose=False)
     ids = m.tokenizer(prompt, return_tensors="pt")
     m.cache.reset()
     with torch.no_grad():
@@ -66,7 +66,6 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="llama-3.2-1b")
     ap.add_argument("--prompt", default="The capital of France is")
-    ap.add_argument("--s-max", type=int, default=512)
     ap.add_argument("--topk", type=int, default=5)
     args = ap.parse_args()
 
@@ -76,7 +75,7 @@ def main() -> int:
     print(f"one forward pass, {hf_id!r}\n  prompt: {args.prompt!r}")
     ref, ids = torch_logits(hf_id, args.prompt)
     print(f"  {ids['input_ids'].shape[-1]} tokens in, {ref.numel()} logits out")
-    got, st = pim_logits(hf_id, args.prompt, args.s_max)
+    got, st = pim_logits(hf_id, args.prompt)
 
     scale = ref.abs().max()
     err = (got - ref).abs().max() / scale

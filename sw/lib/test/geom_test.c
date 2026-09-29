@@ -15,7 +15,7 @@
 // up against each other, and hwdef's is the version emu_mc drove over 8 GiB of real
 // card, so it is the reference and this is the thing being checked.
 //
-// Build hwdef for the topology you want compared:  scripts/setup.sh --map 2
+// Build hwdef for the topology you want compared:  platform/config, then make
 //////////////////////////////////////////////////////////////////////////////////
 #include <stdio.h>
 #include <stdlib.h>

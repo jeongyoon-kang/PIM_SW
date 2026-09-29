@@ -198,10 +198,10 @@ static void viol_clear_all(void)
 static void timing_print_now(void)
 {
     printf("    timing : faw=%u rrd=%u rcd=%u ccd=%u rtp=%u rp=%u wr=%u ras=%u "
-           "mod=%u rpab=%u\n",
+           "mod=%u rpab=%u gb=%u\n",
            cfr_rd(CFR_T_FAW), cfr_rd(CFR_T_RRD), cfr_rd(CFR_T_RCD), cfr_rd(CFR_T_CCD),
            cfr_rd(CFR_T_RTP), cfr_rd(CFR_T_RP),  cfr_rd(CFR_T_WR),  cfr_rd(CFR_T_RAS),
-           cfr_rd(CFR_T_MOD), cfr_rd(CFR_T_RP_AB));
+           cfr_rd(CFR_T_MOD), cfr_rd(CFR_T_RP_AB), cfr_rd(CFR_T_GB));
 }
 
 // v2.0 은 두 종류뿐이다 — ACT_FILL(ACT -> row buffer 채움, 예산 T_RCD)과
@@ -356,6 +356,44 @@ static void bank_copy(uint8_t *bankbuf, uint8_t *payload, uint64_t at, size_t le
         if (to_bank) memcpy(pb, pp, (size_t)(e - s));
         else         memcpy(pp, pb, (size_t)(e - s));
     }
+}
+
+// The MC-space offset of (channel c, bank b, row r, column 0) under this build's map.
+static uint64_t mc_offset_of(unsigned c, unsigned b, uint64_t r)
+{
+    uint64_t row_stride = PIM_ADDR_MAP == PIM_MAP_ROCHBACO
+                        ? (uint64_t)PIM_NCH * PIM_ROBACO_ROW_BYTES : PIM_ROBACO_ROW_BYTES;
+    return pim_ch_first(c) + r * row_stride + (uint64_t)b * EMU_ROW_BYTES;
+}
+
+// Closes the row that each bank of the range holds open, so the direct face sees
+// what the MC path wrote.
+//
+// On v2.0 a bank keeps the last row it touched in its row buffer, and bytes written
+// through the MC stay there until the bank moves to another row; the direct aperture
+// reads HBM and does not see them.  Each bank gets two one-beat MC reads at two
+// different rows (the two after its share).  The controller closes whatever row was
+// open, writing it back, before it answers, and the row left open afterwards was
+// opened by a read, so it matches HBM.
+static int close_rows(int c2h, uint64_t bkoff[PIM_NCH][EMU_NBANKS],
+                      size_t bklen[PIM_NCH][EMU_NBANKS], unsigned *nxfer)
+{
+    static uint8_t beat[EMU_WORD_BYTES] __attribute__((aligned(EMU_WORD_BYTES)));
+    const uint64_t nrows = PIM_BANK_WINDOW / EMU_ROW_BYTES;
+    int e = 0;
+
+    for (unsigned c = 0; c < PIM_NCH; c++)
+        for (unsigned b = 0; b < EMU_NBANKS; b++) {
+            if (!bklen[c][b]) continue;
+            uint64_t last = (bkoff[c][b] + bklen[c][b] - 1) / EMU_ROW_BYTES;
+            for (uint64_t k = 1; k <= 2; k++) {
+                xfer(c2h, "close", pim_mc_at(mc_offset_of(c, b, (last + k) % nrows)),
+                     beat, sizeof beat, false, true, &e);
+                (*nxfer)++;
+                if (e) return e;
+            }
+        }
+    return 0;
 }
 
 // Name the first place a read-back diverges, in every coordinate needed to go look
@@ -529,8 +567,8 @@ int main(int argc, char **argv)
                 "ERROR: --ch means nothing under RoChBaCo.  The channel changes every "
                 "%zu KiB,\n"
                 "       so any range covers every channel and none can be singled out.\n"
-                "       Drop --ch, or build for ChRoBaCo:  scripts/setup.sh --platform %s --map 1\n",
-                ROBACO_ROW >> 10, PIM_PLATFORM_NAME);
+                "       Drop --ch, or build for ChRoBaCo:  ADDR_MAP=1 in platform/config, then make\n",
+                ROBACO_ROW >> 10);
             return 2;
         }
         if (g_ch >= PIM_NCH) {
@@ -601,6 +639,14 @@ int main(int argc, char **argv)
     uint64_t irq0 = err_irq();      // reported at the end, as a delta
     int rc = 0, e;
 
+    // Rows an earlier MC transfer left open would hide the poison below: the MC side
+    // would read, or write back, the old row buffer instead of HBM.
+    unsigned nclose0 = 0;
+    if ((e = close_rows(c2h, bkoff, bklen, &nclose0))) {
+        printf("0. CLOSING OPEN ROWS FAILED: %s\n", strerror(e));
+        rc = 1; goto done;
+    }
+
     // ---- 0. poison, through the direct face, every bank before anything reads ----
     // THE CLOCK STARTS AFTER THE BUFFER IS BUILT.  Generating the stream is this
     // tool's own cost, not the path's — and counting it in one step and not the other
@@ -627,6 +673,7 @@ int main(int argc, char **argv)
     // ---- 1. the payload ---------------------------------------------------------
     printf("\n  step           via       transfers        MB/s\n");
     printf("  -------------- --------- --------- -----------\n");
+    printf("  close rows     MC        %9u %11s\n", nclose0, "-");
     printf("  poison         direct    %9u %11.0f\n", nbk,
            (double)len / (double)(t0e - t0));
 
@@ -657,6 +704,15 @@ int main(int argc, char **argv)
         }
         printf("  write payload  MC        %9u %11.0f   <-- MC WRITE\n", nxfer,
                (double)len / (double)(t2 - t1));
+
+        // The direct read-back below reads HBM, so the rows this write left open are
+        // closed first.
+        unsigned nclose = 0;
+        if ((e = close_rows(c2h, bkoff, bklen, &nclose))) {
+            printf("  close rows     MC        FAILED: %s\n", strerror(e));
+            rc = 1; goto done;
+        }
+        printf("  close rows     MC        %9u %11s\n", nclose, "-");
     }
     if (settle_ms) usleep(settle_ms * 1000u);
 

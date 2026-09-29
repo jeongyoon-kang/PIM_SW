@@ -1,0 +1,26 @@
+{
+ "model": "meta-llama/Llama-3.2-3B-Instruct",
+ "mode": "alloc",
+ "layers": 28,
+ "kv_width": 1024,
+ "weights_bytes": 6425149440,
+ "capacity": 8589934592,
+ "memory_max_tokens": 18432,
+ "model_max_position": 131072,
+ "max_tokens": 18432,
+ "max_tokens_limit": "card memory",
+ "kv_bytes_1024": 117440512,
+ "load_seconds": 87.15696580597432,
+ "started": "2026-09-28 18:18:31",
+ "stop": {
+  "token": 18433,
+  "error": "layer 23: no card memory for a V page at token 18433 (V holds 18432): pim_tensor_grow: 32 unit(s) of 64 KiB for room 19456: the dram pool has no room for 32 granule(s) of 64 KiB"
+ },
+ "last_token_ok": 18432,
+ "events": 16679,
+ "seconds": 0.4082189120235853,
+ "dram_allocated": 8588886016,
+ "dram_pooled": 1048576,
+ "hugepages_held": 4096,
+ "finished": "2026-09-28 18:18:31"
+}

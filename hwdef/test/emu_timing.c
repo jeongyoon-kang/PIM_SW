@@ -10,14 +10,14 @@
 //     ./emu_timing --reset                      base becomes EMU_TIMING_SIM
 //     ./emu_timing --scale 4 --no-run --keep    set it and leave; no queues needed
 //
-// EVERY RUN WRITES ALL EIGHT.  The base is the set below — the HBM2 device numbers
+// EVERY RUN WRITES ALL ELEVEN.  The base is the set below — the HBM2 device numbers
 // in controller cycles — and every register is written every time, so what is on the
 // board after a run depends on this file and the arguments, never on what some
 // earlier run left behind.  --scale multiplies the whole set; an explicitly named
 // value replaces its base entry and is then scaled with the others, because the
 // point of the knob is to move the memory's speed as a WHOLE.  IT IS A WHOLE
 // NUMBER: these are cycle counts, and a fractional scale would land on whatever
-// lround() did with each of the eight rather than on a set anyone chose.  To reach
+// lround() did with each of the ten rather than on a set anyone chose.  To reach
 // a value between two multiples, name it — --rcd 64 does what --scale 4.25 did.
 //
 //     faw 16   rrd 4   rcd 15   ccd 2   rtp 4   rp 17   wr 28   ras 34
@@ -26,13 +26,13 @@
 // bank controller's parameter is RBTP, read-to-precharge WITHIN a bank.  --rbtp is
 // accepted as the same option so neither name has to be translated by hand.
 //
-// EIGHT BITS EACH (dispatcher_top.v:84, TW=8).  A scale that takes a value past 255
-// is REFUSED rather than truncated: the register would take the low byte and report
-// a number nobody asked for, and the readback would agree with it.
+// TEN BITS EACH (v2.0, TW=10).  A scale that takes a value past 1023 is REFUSED
+// rather than truncated: the register would keep only the low bits and report a
+// number nobody asked for, and the readback would agree with it.
 //
 // WHY IT LIVES HERE, AND FOR HOW LONG.  hwdef/test is the tier that reaches the
 // hardware DIRECTLY over MMIO, because nothing owns the control plane yet.  These
-// eight registers are AXI-Lite in the CFR, so `--no-run` needs the BAR and nothing
+// eleven registers are AXI-Lite in the CFR, so `--no-run` needs the BAR and nothing
 // else — usable on a board that was programmed thirty seconds ago, before any queue
 // or module exists.
 //
@@ -110,29 +110,31 @@
 static volatile uint8_t *g_bar;
 static int g_h2c = -1, g_c2h = -1;
 
-// The eight registers are contiguous 4-byte words from CFR_T_FAW, and struct
-// emu_timing lists them in that order — so an index walks both.
-// TEN REGISTERS, AND THEY ARE NOT CONTIGUOUS.  v2.0 put T_MOD and T_RP_AB above
-// PROG_LEN and RUN_CYC, so the old "eight in a row from CFR_T_FAW" walk cannot
-// reach them.  The table carries the offset; the index into it is the field order
-// of struct emu_timing, which is what lets the array cast below stay.
+// The eleven timing registers, in the field order of struct emu_timing, with each
+// one's CFR offset.  T_MOD, T_RP_AB and T_GB sit above PROG_LEN and RUN_CYC, so the
+// offsets are listed rather than computed; an index into this table is also an
+// index into the struct's uint16_t fields.
 static const struct { const char *name; uint32_t off; } TREG[] = {
     { "faw",  CFR_T_FAW  }, { "rrd", CFR_T_RRD }, { "rcd", CFR_T_RCD },
     { "ccd",  CFR_T_CCD  }, { "rtp", CFR_T_RTP }, { "rp",  CFR_T_RP  },
     { "wr",   CFR_T_WR   }, { "ras", CFR_T_RAS },
     { "mod",  CFR_T_MOD  },                      /* v2.0 */
     { "rpab", CFR_T_RP_AB },                     /* v2.0 */
+    { "gb",   CFR_T_GB   },                      /* v2.0 */
 };
 #define T_NREG ((unsigned)(sizeof TREG / sizeof TREG[0]))
+#define OPT_TREG 1000      // getopt value of the first timing option; see main()
+
+_Static_assert(sizeof(struct emu_timing) == T_NREG * sizeof(uint16_t),
+               "TREG and struct emu_timing list the same registers");
 
 // The base set: HBM2 device timing in controller cycles.  --scale multiplies THESE,
 // and --faw/--rcd/... replace an entry before the multiply.
 //
-// THE LAST TWO ARE NOT MEASURED.  mod = 0 means a REGISTER<->BANK switch costs
-// nothing, and rpab = rp means an all-bank precharge is charged like a single-bank
-// one -- which is exactly what v1 did, so this base reproduces v1's behaviour
-// rather than guessing at the difference v2.0 made expressible.  Sweep them.
-static const struct emu_timing TIMING_BASE = { 16, 4, 15, 2, 4, 17, 28, 34, 0, 17 };
+// rp is the single-bank precharge (15) and rpab the all-bank one (17); mod is the
+// stall on a REGISTER <-> BANK mode switch (30); gb spaces WRVEC's beats into the
+// Global Buffer and takes ccd's value (2).
+static const struct emu_timing TIMING_BASE = { 16, 4, 15, 2, 4, 15, 28, 34, 30, 17, 2 };
 
 #define T_REG_MAX CFR_TIMING_MAX   // TW = 10 in v2.0, so 0..1023
 
@@ -240,8 +242,8 @@ static void timing_get(struct emu_timing *t)
         ((uint16_t *)t)[i] = (uint16_t)(cfr_rd(TREG[i].off) & CFR_TIMING_MAX);
 }
 
-// base * scale into `out`.  Refuses rather than truncates: the register is 8 bits,
-// and a value that wrapped would read back as whatever the low byte is and look
+// base * scale into `out`.  Refuses rather than truncates: the register is 10 bits,
+// and a value that wrapped would read back as whatever the low bits are and look
 // like it had been accepted.
 static bool timing_scale(const struct emu_timing *base, unsigned s, struct emu_timing *out)
 {
@@ -543,13 +545,14 @@ static void usage(const char *p)
     printf(
 "%s — the DRAM timing registers, one argument each.\n"
 "\n"
-"  EVERY RUN WRITES ALL EIGHT.  The base set is\n"
-"    faw %u  rrd %u  rcd %u  ccd %u  rtp %u  rp %u  wr %u  ras %u\n"
+"  EVERY RUN WRITES ALL ELEVEN.  The base set is\n"
+"    faw %u  rrd %u  rcd %u  ccd %u  rtp %u  rp %u  wr %u  ras %u  mod %u  rpab %u  gb %u\n"
 "  and what goes into the register is base * scale, refused above %u\n"
-"  (the register is 8 bits).\n"
+"  (the register is 10 bits).\n"
 "\n"
 "    --scale N                 multiply the whole set by a whole number (default 1)\n"
 "    --faw N  --rrd N  --rcd N  --ccd N  --rtp N  --rp N  --wr N  --ras N\n"
+"    --mod N  --rpab N  --gb N\n"
 "                              replace one base value; it is scaled with the rest\n"
 "    --rbtp N                  the bank controller's name for --rtp\n"
 "    --sweep <name> v1,v2,..   one knob, several base values, one run each\n"
@@ -583,6 +586,7 @@ static void usage(const char *p)
     p,
     TIMING_BASE.faw, TIMING_BASE.rrd, TIMING_BASE.rcd, TIMING_BASE.ccd,
     TIMING_BASE.rtp, TIMING_BASE.rp,  TIMING_BASE.wr,  TIMING_BASE.ras,
+    TIMING_BASE.mod, TIMING_BASE.rp_ab, TIMING_BASE.gb,
     T_REG_MAX, EMU_BEATS_PER_ROW, EMU_BEATS_PER_ROW, EMU_MAX_OPSIZE, EMU_MAX_OPSIZE);
 }
 
@@ -646,8 +650,8 @@ int main(int argc, char **argv)
     unsigned scale = 1;
     bool run = true, keep = false, unsafe = false, do_reset = false, gemv = false;
     bool show = false;
-    bool set_field[8] = { false };
-    uint8_t set_val[8] = { 0 };
+    bool set_field[T_NREG] = { false };
+    uint16_t set_val[T_NREG] = { 0 };
     struct emu_timing before, base;
     uint8_t *buf = NULL;
     int failed = 0;
@@ -656,9 +660,11 @@ int main(int argc, char **argv)
     { const char *bad = pim_platform_check(); if (bad) { fprintf(stderr, "%s\n", bad); return 2; } }
 
     static struct option lo[] = {
-        {"faw",1,0,'0'},{"rrd",1,0,'1'},{"rcd",1,0,'2'},{"ccd",1,0,'3'},
-        {"rtp",1,0,'4'},{"rp",1,0,'5'},{"wr",1,0,'6'},{"ras",1,0,'7'},
-        {"rbtp",1,0,'4'},
+        // A timing option's value is OPT_TREG + its index in TREG.
+        {"faw",1,0,OPT_TREG+0},{"rrd",1,0,OPT_TREG+1},{"rcd",1,0,OPT_TREG+2},
+        {"ccd",1,0,OPT_TREG+3},{"rtp",1,0,OPT_TREG+4},{"rp",1,0,OPT_TREG+5},
+        {"wr",1,0,OPT_TREG+6},{"ras",1,0,OPT_TREG+7},{"rbtp",1,0,OPT_TREG+4},
+        {"mod",1,0,OPT_TREG+8},{"rpab",1,0,OPT_TREG+9},{"gb",1,0,OPT_TREG+10},
         {"scale",1,0,'s'},
         {"sweep",1,0,'S'},{"reset",0,0,'R'},{"allow-unsafe",0,0,'U'},{"show",0,0,'w'},
         {"row",1,0,'W'},{"beats",1,0,'b'},{"reps",1,0,'N'},
@@ -667,9 +673,9 @@ int main(int argc, char **argv)
         {"bdf",1,0,'B'},{"h2c",1,0,'H'},{"c2h",1,0,'D'},{"help",0,0,'h'},{0,0,0,0}
     };
     for (int o; (o = getopt_long(argc, argv, "h", lo, NULL)) != -1; ) {
-        if (o >= '0' && o <= '7') {
-            set_field[o - '0'] = true;
-            set_val[o - '0'] = (uint8_t)strtoul(optarg, NULL, 0);
+        if (o >= OPT_TREG && o < OPT_TREG + (int)T_NREG) {
+            set_field[o - OPT_TREG] = true;
+            set_val[o - OPT_TREG] = (uint16_t)strtoul(optarg, NULL, 0);
             continue;
         }
         switch (o) {
@@ -743,10 +749,10 @@ int main(int argc, char **argv)
 
     base = TIMING_BASE;
     if (do_reset) { struct emu_timing sim = EMU_TIMING_SIM; base = sim; }
-    for (unsigned i = 0; i < 8; i++) if (set_field[i]) ((uint8_t *)&base)[i] = set_val[i];
+    for (unsigned i = 0; i < T_NREG; i++) if (set_field[i]) ((uint16_t *)&base)[i] = set_val[i];
     timing_print("base           :", &base);
     printf("scale          : x%u\n", scale);
-    // The only path that writes NOTHING.  Every other run writes all eight, so
+    // The only path that writes NOTHING.  Every other run writes all eleven, so
     // without this there is no way to ask the board what it is holding.
     if (show) {
         struct emu_timing t;
@@ -787,7 +793,7 @@ int main(int argc, char **argv)
         char *copy = strdup(sweep_vals), *tok, *save = NULL;
         for (tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             struct emu_timing b = base;
-            ((uint8_t *)&b)[f] = (uint8_t)strtoul(tok, NULL, 0);
+            ((uint16_t *)&b)[f] = (uint16_t)strtoul(tok, NULL, 0);
             if (one(&b, scale, &w, reps, row, beats, buf, unsafe, run, gemv) != 0)
                 failed++;
         }

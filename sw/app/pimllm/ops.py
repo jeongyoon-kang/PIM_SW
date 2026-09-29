@@ -35,6 +35,7 @@ import _pim
 
 OUT_MAJOR = _pim.OUT_MAJOR
 RED_MAJOR = _pim.RED_MAJOR
+OUT_PACKED = _pim.OUT_PACKED
 ACC_SINGLE = _pim.ACC_SINGLE
 ACC_DUAL = _pim.ACC_DUAL
 ALLOC_ZERO = _pim.ALLOC_ZERO
@@ -93,12 +94,31 @@ class Tensor:
     over — see include/pimrt/pim_tensor.h.  In model terms:
 
         linear weight   OUT_MAJOR  [out_features, in_features]  (nn.Linear order)
-        K cache         OUT_MAJOR  [S_max, H_kv*D]   a token is an OUTPUT
-        V cache         RED_MAJOR  [H_kv*D, S_max]   a token is a REDUCTION STEP
+        K cache         OUT_PACKED [tokens, H_kv*D]  a token is an OUTPUT; tokens
+                                                     share a bank row when H_kv*D
+                                                     is under half a row
+        V cache         RED_MAJOR  [H_kv*D, tokens]  a token is a REDUCTION STEP
+
+    A weight is allocated at its size.  A KV tensor is `growable`: it starts with no
+    room for tokens and `grow` adds pages as they arrive.
     """
 
     def __init__(self, layout: int, nout: int, nred: int, zero: bool = False):
         self._t = _pim.Tensor(layout, nout, nred, ALLOC_ZERO if zero else 0)
+
+    @classmethod
+    def growable(cls, layout: int, fixed: int) -> "Tensor":
+        """A tensor with no room yet along its growth axis — `out` for OUT_MAJOR and
+        OUT_PACKED, `red` for RED_MAJOR.  `fixed` is the other axis, H_kv*D for a KV
+        cache.  Nothing is allocated until the first grow."""
+        t = cls.__new__(cls)
+        t._t = _pim.Tensor.growable(layout, fixed)
+        return t
+
+    def grow(self, n: int) -> int:
+        """Room for at least `n` along the growth axis.  Allocates the pages it
+        needs and returns how many units that was; 0 when there was room."""
+        return self._t.grow(n)
 
     @classmethod
     def from_weight(cls, w: torch.Tensor) -> "Tensor":
@@ -125,7 +145,7 @@ class Tensor:
         `src` is [count, the other axis].  One new token of K is [1, H_kv*D] and of
         V is also [1, H_kv*D]; the difference in what that costs is in the layout,
         not in this call."""
-        other = self.nred if self.layout == OUT_MAJOR else self.nout
+        other = self.nout if self.layout == RED_MAJOR else self.nred
         if src.numel() % other:
             raise ValueError(f"append source has {src.numel()} elements, not a "
                              f"multiple of {other}")
@@ -148,6 +168,15 @@ class Tensor:
     nred = property(lambda self: self._t.nred)
     ngroups = property(lambda self: self._t.ngroups)
     frontier = property(lambda self: self._t.frontier)
+    pack = property(lambda self: self._t.pack)
+    room = property(lambda self: self._t.room)
+    nunits = property(lambda self: self._t.nunits)
+    npages = property(lambda self: self._t.npages)
+
+    def groups(self, n: int) -> int:
+        """MAC groups that cover outputs [0, n).  With pack > 1 this is not
+        ceil(n / per_group): a MAC covers every pack-th output of a row."""
+        return self._t.groups(n)
     bytes = property(lambda self: self._t.bytes)
 
     def __repr__(self):

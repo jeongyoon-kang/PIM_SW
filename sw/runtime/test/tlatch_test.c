@@ -156,12 +156,18 @@ int main(int argc, char **argv)
                    "        and degenerates to SINGLE.  Try --groups 4.\n");
     }
 
+    // v2.0: ACT_FILL is routine on an open-page image (the first touch of a row
+    // overruns T_RCD); PRE_DRAIN is not, because nothing here dirties a row.
+    //
+    // The CHECK used to read a field of `v` that may never have been written --
+    // pim_exec_violation_detail can fail and the guard above only skipped the
+    // print.  It is inside the guard now.
     for (uint32_t ch = 0; ch < g->nch; ch++) {
         pim_viol v;
-        if (!pim_exec_violation_detail(e, ch, &v))
-            printf("\nch%u violations: RCD_RD %u, RECOVERY_WR %u, CCD_WR %u",
-                   ch, v.rcd_rd, v.recovery_wr, v.ccd_wr);
-        CHECK(!v.ccd_wr, "ch%u raised CCD_WR, which nothing here should", ch);
+        if (pim_exec_violation_detail(e, ch, &v)) continue;
+        printf("\nch%u violations: ACT_FILL %u (worst +%u), PRE_DRAIN %u",
+               ch, v.act_fill, v.worst_act_fill, v.pre_drain);
+        CHECK(!v.pre_drain, "ch%u raised PRE_DRAIN, which nothing here should", ch);
     }
     printf("\n\n%s\n", fail ? "FAIL" : "all checks passed");
 

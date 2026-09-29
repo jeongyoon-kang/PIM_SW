@@ -96,9 +96,18 @@ typedef struct pim_exec pim_exec;
  * hwdef/emu_regs.h calls 8 quiet, which held for the single-beat probe it was
  * measured with and does not hold here.  Raise it only to make the CSR readable;
  * it buys no correctness. */
-typedef struct { uint8_t faw, rrd, rcd, ccd, rtp, rp, wr, ras; } pim_timing;
-#define PIM_TIMING_SIM    ((pim_timing){ 30, 6, 4, 2, 3, 3, 4, 6 })
-#define PIM_TIMING_QUIET  ((pim_timing){ 30, 6, 8, 2, 3, 3, 4, 6 })
+/* TEN BUDGETS IN v2.0, AND TEN BITS EACH.  mod prices the REGISTER <-> BANK mode
+ * switch that a WRVEC -> MAC -> RD_MAC schedule pays twice per group; rp_ab is the
+ * all-bank precharge, which v1 charged at the single-bank rate.  uint16_t because a
+ * byte truncated 1023 to 255 and the result read back as a timing that was simply
+ * fast.  They are NOT contiguous registers -- see pim_timing_off[]. */
+typedef struct {
+	uint16_t faw, rrd, rcd, ccd, rtp, rp, wr, ras;
+	uint16_t mod, rp_ab;
+} pim_timing;
+#define PIM_TIMING_NREG   10
+#define PIM_TIMING_SIM    ((pim_timing){ 30, 6, 4, 2, 3, 3, 4, 6, 0, 3 })
+#define PIM_TIMING_QUIET  ((pim_timing){ 30, 6, 8, 2, 3, 3, 4, 6, 0, 3 })
 
 /* Read the eight registers back off the board.  They are 32-bit AXI-Lite and this
  * is eight MMIO reads; there is no caching, so this is what the device HAS, not
@@ -112,7 +121,7 @@ const pim_timing *pim_exec_timing_at_open(const pim_exec *e);
 
 /* The register offsets in the order the struct lists them, for a tool that wants to
  * name them.  CFR_T_FAW .. CFR_T_RAS are contiguous 4-byte registers. */
-extern const char *const pim_timing_names[8];
+extern const char *const pim_timing_names[PIM_TIMING_NREG];
 
 typedef struct {
     const char *bdf;         /* NULL -> "0000:01:00.0" */

@@ -188,6 +188,12 @@ const char *pim_matvec_logical_part(const pim_geometry *g, const pim_tensor *m,
                  "tensor has", out_first, out_first + out_count, m->ngroups);
         return mv_err;
     }
+    if (out_first % m->pack) {
+        snprintf(mv_err, sizeof mv_err,
+                 "pim_matvec_logical: out_first %u is not a multiple of the %u MAC "
+                 "groups that share one bank row", out_first, m->pack);
+        return mv_err;
+    }
     hi = slice_hi(red_off, red_len);
     if (hi > m->nredpad) {
         snprintf(mv_err, sizeof mv_err,
@@ -241,20 +247,30 @@ const char *pim_matvec_logical_part(const pim_geometry *g, const pim_tensor *m,
             }
 
             for (uint32_t t = 0; t < ng; t++) {
-                uint32_t unit = pim_tensor_unit(m, out_first + g0 + t, ck);
+                uint32_t grp  = out_first + g0 + t;
+                uint32_t unit = pim_tensor_unit(m, grp, ck);
+                // The unit's own address, so a growable tensor's units can sit in
+                // different allocations.
+                void    *ua   = pim_tensor_unit_addr(g, m, unit);
 
+                if (!ua) {
+                    snprintf(mv_err, sizeof mv_err,
+                             "pim_matvec_logical: unit %u (group %u, chunk %u) is past "
+                             "the %u this tensor holds", unit, grp, ck,
+                             pim_tensor_nunits(m));
+                    return mv_err;
+                }
                 s = emu_isr_default_ch(ISR_OP_MAC, all_ch);
                 s.opsize     = beats;
                 s.row        = 0;
-                s.col        = col;       /* which operand inside the row */
+                s.col        = col + pim_tensor_row_off(m, grp) / ELEMS_PER_BEAT;
                 s.pu_mask    = (1u << g->nbank) - 1u;
                 s.gb_mc_mask = s.pu_mask;
                 if ((bad = emu_isr_build(&isr, &s))) return bad;
                 if (t) emu_isr_set(&isr, ISR_F_T, 1u);
                 if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
                                                 PIM_REF_DRAM_UNIT, PIM_SPLIT_NONE,
-                                                m->base, pim_tensor_bytes(g, m),
-                                                unit, m->tag)))
+                                                ua, g->unit_bytes, 0, m->tag)))
                     return bad;
             }
         }

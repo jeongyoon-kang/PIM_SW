@@ -51,21 +51,23 @@
 #include <linux/slab.h>
 
 #include "pim_drv.h"
+#include "pim_config.h"	/* hwdef/, generated from platform/config */
 
 /* ------------------------------------------------------------- parameters --- */
-static unsigned int pim_channels = 4;
-static unsigned int pim_banks    = 16;
+/* Defaults are platform/config's values at build time, so a bare insmod matches it. */
+static unsigned int pim_channels = PIM_NCH;
+static unsigned int pim_banks    = PIM_NBANK;
 static unsigned int pim_row_size = 2048;
-static unsigned int pim_addr_map = PIM_MAP_ROCHBACO;
-static unsigned long long pim_base       = 0x020400000000ULL;	/* MC s_axi aperture */
-static unsigned long long pim_ch_span    = 0x100000000ULL;	/* 4 GiB per channel */
+static unsigned int pim_addr_map = PIM_ADDR_MAP;
+static unsigned long long pim_base       = PIM_MC_BASE;		/* MC s_axi aperture */
+static unsigned long long pim_ch_span    = PIM_MC_CH_SPAN;	/* DRAM per channel */
 static unsigned long long pim_hugepage_size = 2ULL << 20;		/* design §4 */
 /* The GPR lives at the bottom of BAR2's AXI window and the CFR begins immediately
  * after it — CFR offset 0 is the DOORBELL.  Nothing here can overrun into it (the
  * ledger never hands out a hugepage past `bytes`), but that is why the size is a
  * parameter and not something anyone should round up "to be safe". */
-static unsigned long long pim_gpr_base = 0x020200000000ULL;	/* BAR2 AXI + OFF_GPR */
-static unsigned long long pim_gpr_size = 4ULL << 20;		/* 4 MiB */
+static unsigned long long pim_gpr_base = PIM_BAR2_AXI_BASE + PIM_OFF_GPR;
+static unsigned long long pim_gpr_size = PIM_OFF_CFR - PIM_OFF_GPR;
 static unsigned long long pim_gpr_page = 4096;			/* design §9.4 */
 static bool pim_track_owners = true;
 

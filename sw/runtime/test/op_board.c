@@ -69,6 +69,7 @@ static void compare(const char *what, const uint16_t *got, const uint16_t *want,
 #define H_KV       8u          /* KV heads.  H_KV*D = 1024 = one row     */
 #define S_MAX    512u
 #define S_KV     100u          /* deliberately not a multiple of 16      */
+#define D_PK      64u          /* head dim, Llama-3.2-1B: H_KV*D_PK = 512 */
 
 int main(void)
 {
@@ -156,6 +157,67 @@ int main(void)
         }
         pim_tensor_free(c, &K);
         free(Kh); free(q); free(y); free(golden); free(row);
+    }
+
+    // ---- 2b. Q . K^T with neighbouring tokens sharing a bank row ------------
+    // Llama-3.2-1B's shape: 8 KV heads of 64, so one token's K is half a row and
+    // an OUT_PACKED tensor puts tokens 2i and 2i+1 side by side in it.  K is filled
+    // two ways — one append for all tokens (one DMA) and one append per token, as
+    // decoding does — and both must give every head's scores exactly.  The token
+    // counts cover a partial row (10), one token past a full row (65), and 100.
+    printf("\n  2b. Q . K^T, OUT_PACKED   (D = %u, H_kv*D = %u)\n", D_PK, H_KV * D_PK);
+    {
+        static const uint32_t NS[] = { 10, 65, 100 };
+        uint32_t  kvw = H_KV * D_PK;
+        uint16_t *Kh  = malloc((size_t)S_MAX * kvw * 2);
+        uint16_t *q   = malloc((size_t)D_PK * 2);
+        uint16_t *y   = malloc((size_t)pim_op_outputs(rt, S_MAX / per) * 2);
+        uint16_t *golden = malloc((size_t)S_MAX * 2);
+
+        for (size_t i = 0; i < (size_t)S_MAX * kvw; i++) Kh[i] = rnd_bf16();
+
+        for (unsigned ni = 0; ni < sizeof NS / sizeof *NS; ni++) {
+            uint32_t   n = NS[ni];
+            pim_tensor Kb, Kt;
+
+            CHECK(!(bad = pim_tensor_alloc(c, PIM_LAYOUT_OUT_PACKED, S_MAX, kvw, 0, &Kb)),
+                  "alloc: %s", bad ? bad : "");
+            CHECK(!(bad = pim_tensor_alloc(c, PIM_LAYOUT_OUT_PACKED, S_MAX, kvw, 0, &Kt)),
+                  "alloc: %s", bad ? bad : "");
+            CHECK(Kb.pack == 2 && Kb.slot == 512, "pack %u slot %u, not 2 and 512",
+                  Kb.pack, Kb.slot);
+            CHECK(!(bad = pim_tensor_append(c, &Kb, 0, n, Kh)), "append: %s",
+                  bad ? bad : "");
+            for (uint32_t t = 0; t < n; t++)
+                CHECK(!(bad = pim_tensor_append(c, &Kt, t, 1, Kh + (size_t)t * kvw)),
+                      "append t=%u: %s", t, bad ? bad : "");
+
+            for (unsigned which = 0; which < 2; which++) {
+                const pim_tensor *K = which ? &Kt : &Kb;
+                uint32_t ngroup = pim_tensor_groups(K, n);
+                for (uint32_t h = 0; h < H_KV; h++) {
+                    char what[64];
+                    for (uint32_t i = 0; i < D_PK; i++) q[i] = rnd_bf16();
+                    CHECK(!(bad = pim_op_matvec(rt, K, 0, ngroup, h * D_PK, D_PK, q, y,
+                                                PIM_ACC_SINGLE)), "op n=%u h=%u: %s",
+                          n, h, bad ? bad : "");
+                    for (uint32_t s = 0; s < n; s++)
+                        golden[s] = pim_mac_exact(Kh + (size_t)s * kvw + (size_t)h * D_PK,
+                                                  q, D_PK);
+                    if (h == 0 || h == H_KV - 1) {
+                        snprintf(what, sizeof what, "%s n=%u head %u (%u MAC)",
+                                 which ? "per-token" : "one DMA ", n, h, ngroup);
+                        compare(what, y, golden, n);
+                    } else {
+                        for (uint32_t s = 0; s < n; s++)
+                            CHECK(y[s] == golden[s], "n=%u h=%u token %u differs", n, h, s);
+                    }
+                }
+            }
+            pim_tensor_free(c, &Kb);
+            pim_tensor_free(c, &Kt);
+        }
+        free(Kh); free(q); free(y); free(golden);
     }
 
     // ---- 3. S . V, a ragged reduction over the sequence --------------------
@@ -288,8 +350,8 @@ int main(void)
         if (bad) printf("     DUAL without evidence: \"%.62s...\"\n", bad);
 
         bad = pim_op_matvec(rt, &W, 0, 1, 0, 9999, v, y, PIM_ACC_SINGLE);
-        CHECK(bad != NULL, "red_len past max_red was accepted");
-        if (bad) printf("     red_len past max_red : \"%.62s...\"\n", bad);
+        CHECK(bad != NULL, "red_len past the tensor's reduction axis was accepted");
+        if (bad) printf("     red_len past the tensor: \"%.62s...\"\n", bad);
 
         // An allocation nothing filled carries no tag, so a program built for a
         // layout cannot read it.  This is the check that stops a forgotten upload
@@ -316,12 +378,14 @@ int main(void)
         printf("  timing (set by emu_timing, read here): faw %u rrd %u rcd %u "
                "ccd %u rtp %u rp %u wr %u ras %u\n",
                t->faw, t->rrd, t->rcd, t->ccd, t->rtp, t->rp, t->wr, t->ras);
+        printf("               mod %u  rpab %u\n", t->mod, t->rp_ab);
     }
     for (unsigned ch = 0; ch < g->nch; ch++) {
         pim_viol vi;
         if (!pim_exec_violation_detail(pim_rt_exec(rt), ch, &vi))
-            printf("  ch%u  rcd_rd %u  ccd_rd %u  ccd_wr %u  recovery_wr %u\n",
-                   ch, vi.rcd_rd, vi.ccd_rd, vi.ccd_wr, vi.recovery_wr);
+            printf("  ch%u  act_fill %u (worst +%u)  pre_drain %u (worst +%u)\n",
+                   ch, vi.act_fill, vi.worst_act_fill,
+                   vi.pre_drain, vi.worst_pre_drain);
     }
 
     pim_rt_close(rt);

@@ -313,6 +313,9 @@ const char *pim_gemv_program(const pim_geometry *g, const pim_tensor *w,
     const char *bad;
 
     if (!g || !w || !unit_row || !out) return "pim_gemv_program: null argument";
+    if (w->pack != 1)
+        return "pim_gemv_program: this builder places one output per bank row; a "
+               "packed tensor goes through pim_matvec_logical";
     if (group_first + group_count > w->ngroups)
         return "pim_gemv_program: the group range runs past the allocation";
     if (pim_gemv_nisr(w, group_count, mode) > out->cap) {

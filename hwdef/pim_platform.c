@@ -145,19 +145,17 @@ const char *pim_addr_map_check(uint32_t mode_ctrl)
         "       The map decides which channel and bank every address reaches, so a\n"
         "       mismatch reads the wrong bytes without any error at all.\n"
         "       Set the board to match:  hwdef/test/emu_sanity\n"
-        "       Or rebuild for what the board has:  scripts/setup.sh --platform %s --map %u",
+        "       Or build for what the board has:  ADDR_MAP=%u in platform/config, then make",
         PIM_ADDR_MAP_NAME, PIM_ADDR_MAP_WHAT, on ? "RoChBaCo" : "ChRoBaCo",
-        PIM_PLATFORM_NAME, on + 1u);
+        on + 1u);
     return err;
 }
 
 void pim_platform_banner(void)
 {
-    printf("platform %s (%s)  —  %u ch x %u bank, window %llu MiB, "
+    printf("platform %s  —  %u ch x %u bank, window %llu MiB, "
            "stride %llu MiB\n",
            PIM_PLATFORM_NAME,
-           PIM_CONFIG_FROM_CONF ? "compiled in"
-                                : "COMPILED-IN DEFAULTS - no platform selected",
            PIM_NCH, PIM_NBANK,
            (unsigned long long)(PIM_BANK_WINDOW >> 20),
            (unsigned long long)(PIM_BANK_STRIDE >> 20));
@@ -173,60 +171,58 @@ void pim_platform_banner(void)
     // back is one printf.  Do not, unless something has started reading them.
 }
 
+// One KEY=VALUE line of platform/config: leading blanks skipped, the value ends at
+// whitespace or '#'.
+static bool sel_value(const char *line, const char *key, char *out, size_t n)
+{
+    size_t k = strlen(key);
+    while (*line == ' ' || *line == '\t') line++;
+    if (strncmp(line, key, k) != 0 || line[k] != '=') return false;
+    line += k + 1;
+    size_t i = 0;
+    while (line[i] && line[i] != '\n' && line[i] != ' ' && line[i] != '\t' &&
+           line[i] != '#' && i + 1 < n) {
+        out[i] = line[i];
+        i++;
+    }
+    out[i] = '\0';
+    return true;
+}
+
 const char *pim_platform_check(void)
 {
     static char err[512];
 
-    // FIRST: was a platform chosen at all?  The constants have compiled-in defaults
-    // so that a bare `make` produces a working binary — but a binary nobody chose a
-    // platform for is exactly the one that must not run.  It carries ch4's channel
-    // count and bank stride because something had to be there, not because anyone
-    // said ch4, and there is no reading of the board that would tell the difference.
-    // So this is a refusal, not the warning below.
-    if (!PIM_CONFIG_FROM_CONF) {
-        snprintf(err, sizeof err,
-            "this binary was built from pim_config.h's COMPILED-IN DEFAULTS (%s) "
-            "because no platform was selected.\n"
-            "       Those values are a placeholder, not a choice — a wrong channel "
-            "count returns plausible numbers.\n"
-            "       Build through:  scripts/setup.sh --platform chN",
-            PIM_PLATFORM_NAME);
-        return err;
-    }
-
-    // A readlink and a strcmp.  The board cannot report its channel count, so this
-    // is not "does the build match the hardware" — it is "does the build match what
-    // the user selected", which is the mistake that actually happens: choose a
-    // platform, forget to rebuild, run yesterday's binary.
-    char target[512];
-    ssize_t k = readlink(PIM_CONF_PATH, target, sizeof target - 1);
-    if (k <= 0) {
-        // Only reachable with PIM_CONFIG_FROM_CONF, i.e. a path that WAS read at
-        // build time and is not readable now — a moved tree.  It cannot tell
-        // agreement from disagreement, so it claims neither.
+    // Compare CH / REV / ADDR_MAP in platform/config with the values this build used.
+    FILE *f = fopen(PIM_CONFIG_PATH, "r");
+    if (!f) {
+        // Unreadable now (moved tree?): warn and do not refuse.
         fprintf(stderr,
-            "WARNING: cannot read %s, so this build's platform (%s) was not checked "
-            "against the selected one.  Moved tree?\n", PIM_CONF_PATH, PIM_PLATFORM_NAME);
+            "WARNING: cannot read %s, so this build (%s) was not checked against it.  "
+            "Moved tree?\n", PIM_CONFIG_PATH, PIM_PLATFORM_NAME);
         return NULL;
     }
-    target[k] = '\0';
+    char ch[32] = "", rev[64] = "", map[32] = "", line[256];
+    while (fgets(line, sizeof line, f)) {
+        if (sel_value(line, "CH", ch, sizeof ch)) continue;
+        if (sel_value(line, "REV", rev, sizeof rev)) continue;
+        sel_value(line, "ADDR_MAP", map, sizeof map);
+    }
+    fclose(f);
 
-    const char *base = strrchr(target, '/');
-    base = base ? base + 1 : target;
-    char name[sizeof target];
-    snprintf(name, sizeof name, "%s", base);
-    char *dot = strstr(name, ".conf");
-    if (dot) *dot = '\0';
+    char built[32];
+    snprintf(built, sizeof built, "%u", PIM_SEL_CH);
+    char built_map[32];
+    snprintf(built_map, sizeof built_map, "%u", PIM_SEL_ADDR_MAP);
+    if (strcmp(ch, built) == 0 && strcmp(rev, PIM_SEL_REV) == 0 &&
+        strcmp(map, built_map) == 0)
+        return NULL;
 
-    if (strcmp(name, PIM_PLATFORM_NAME) == 0) return NULL;
-
-    // %.31s: `name` came from a symlink target and could in principle be long; the
-    // message must not be truncated at the point where it says what to do about it.
     snprintf(err, sizeof err,
-        "this binary was built for platform '%s' but '%.31s' is selected.\n"
-        "       The topology is compiled in, so it does not follow the symlink.\n"
-        "       Rebuild:  scripts/setup.sh --platform %.31s\n"
-        "       (selected via %s)",
-        PIM_PLATFORM_NAME, name, name, PIM_CONF_PATH);
+        "this binary was built for CH=%u REV=%s ADDR_MAP=%u (%s)\n"
+        "       but %s now says CH=%.8s REV=%.24s ADDR_MAP=%.8s.\n"
+        "       The platform is compiled in.  Rebuild:  make   (in emulator_top/)",
+        PIM_SEL_CH, PIM_SEL_REV, PIM_SEL_ADDR_MAP, PIM_PLATFORM_NAME,
+        PIM_CONFIG_PATH, ch, rev, map);
     return err;
 }

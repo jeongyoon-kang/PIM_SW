@@ -2,21 +2,12 @@
 //////////////////////////////////////////////////////////////////////////////////
 // pim_platform — the addresses, as compile-time constants.
 //
-// The values come from platform/<name>.conf via `hwdef/gen_config.sh --defs`, which
-// scripts/setup.sh turns into -D arguments for the whole build.  pim_config.h holds
-// a default for each one (ch4) so a bare `make` still compiles; PIM_CONFIG_FROM_CONF
-// records which of the two happened, and pim_platform_check() refuses the defaults.  They are fixed for as long as one bitstream is on the board, so
-// there is nothing to load, nothing to pass around, and nothing to get wrong at
-// run time — the same status PIM_NBANK and the 256 b geometry always had.  There
-// used to be a struct threaded through every call and a conf parser to fill it;
-// see gen_config.sh for why that went.
+// The values come from platform/config (CH, REV, ADDR_MAP) and the image conf it
+// selects, via pim_config.h — a header gen_config.sh generates on every make.
+// They are fixed for as long as one bitstream is on the board.
 //
-// THE ONE THING THAT IS STILL CHECKED AT RUN TIME
-// The hardware cannot report its own channel count, so nothing can compare this
-// build against the board.  What CAN be compared is this build against the
-// platform the user has selected, and that is the mistake that actually happens:
-// setup.sh --platform ch1, forget to make, run a ch2 binary.  pim_platform_check()
-// is a readlink and a strcmp.
+// pim_platform_check() re-reads CH / REV / ADDR_MAP from platform/config at run time
+// and refuses a binary built from different values.
 //////////////////////////////////////////////////////////////////////////////////
 #ifndef PIM_PLATFORM_H
 #define PIM_PLATFORM_H
@@ -27,16 +18,12 @@
 
 #include "emu_regs.h"       // EMU_ROW_BYTES / EMU_NBANKS: the MC address math needs
                             // the DRAM page size, and it has exactly one home.
-#include "pim_config.h"     // static defaults; -D overrides them.  See gen_config.sh
+#if !__has_include("pim_config.h")
+#error "hwdef/pim_config.h is missing: run make in emulator_top/ (it is generated from platform/config)"
+#endif
+#include "pim_config.h"     // GENERATED from platform/config.  See gen_config.sh
 
-// ---- what the conf must satisfy, checked where a violation is a build error ----
-// CH4 halves the bank stride while the window stays 256 MiB, and getting that pair
-// wrong by hand is the likeliest editing mistake in those files.
-//
-// THESE DO NOT CATCH A PARTIAL -D.  They relate the geometry values to each other,
-// and PIM_NCH appears in none of them — a build that overrode the channel count and
-// nothing else passes all five while addressing the wrong stride.  That is why
-// gen_config.sh emits every key every time instead of only the ones that differ.
+// ---- what the conf must satisfy ----
 _Static_assert(PIM_NCH >= 1 && PIM_NCH <= 8, "PIM_NCH out of range");
 _Static_assert(PIM_NBANK == 16, "the BD instantiates 16 banks per channel");
 _Static_assert(PIM_BANK_WINDOW <= PIM_BANK_STRIDE, "bank windows would overlap");
@@ -44,8 +31,7 @@ _Static_assert((uint64_t)PIM_NBANK * PIM_BANK_STRIDE <= PIM_HBM_CH_SPAN,
                "the banks of one channel overrun HBM_CH_SPAN");
 _Static_assert(PIM_BANK_WINDOW % 2048 == 0, "BANK_WINDOW is not a whole 2048 B row");
 
-// Derived, never -D'd: overriding it would let it disagree with PIM_NCH, and
-// pim_hbm_decode() uses it to decide what is inside the aperture at all.
+// Derived from PIM_NCH.  pim_hbm_decode() uses it as the aperture bound.
 #define PIM_HBM_APERTURE  ((uint64_t)PIM_NCH * PIM_HBM_CH_SPAN)
 
 // ---- addresses ---------------------------------------------------------------
@@ -89,7 +75,7 @@ static inline uint64_t pim_mc_at(uint64_t a) { return PIM_MC_BASE + a; }
 // COMPILED IN, like everything else here.  It is a register on the board
 // (MODE_CTRL, emu_regs.h) and could have been read at run time — but then every
 // caller would carry a map argument, and two callers could disagree.  It is chosen
-// once by scripts/setup.sh --map, exactly the way the channel count is, and a build
+// once in platform/config (ADDR_MAP), like the channel count, and a build
 // checks the board against itself at open rather than following it.
 //
 // So: nothing above this file passes a map around.  pim_decode() answers with the
@@ -183,9 +169,8 @@ const char *pim_window_name(uint64_t axi);
 // says so in its own output rather than in the reader's memory.
 void pim_platform_banner(void);
 
-// NULL if this build matches platform/active, else a reason to print and exit.
-// A tree that has been moved (PIM_CONF_PATH unreadable) returns NULL with a warning
-// on stderr: it cannot tell agreement from disagreement, so it claims neither.
+// NULL if this build matches platform/config, else a reason to print and exit.
+// If PIM_CONFIG_PATH is unreadable (moved tree) it warns on stderr and returns NULL.
 const char *pim_platform_check(void);
 
 #endif // PIM_PLATFORM_H

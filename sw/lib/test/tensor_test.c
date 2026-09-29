@@ -33,16 +33,22 @@ static int fail;
 
 #define POISON16  ((uint16_t)((FAKE_POISON << 8) | FAKE_POISON))
 
-// The whole allocation, flat, as the card holds it right now.
+// Every unit of the tensor, flat and in unit order, as the card holds it right now.
+// Read unit by unit so a growable tensor, whose units sit in several allocations,
+// comes back in the same shape as one allocation.
 static uint16_t *snapshot(pim_ctx *c, const pim_tensor *t)
 {
-    size_t    n = pim_tensor_bytes(pim_geom_ctx(c), t);
-    uint16_t *b = malloc(n);
+    const pim_geometry *g = pim_geom_ctx(c);
+    size_t    n = pim_tensor_bytes(g, t);
+    uint16_t *b = malloc(n ? n : 1);
     const char *bad;
 
     if (!b) { printf("  FAIL: out of host memory for a %zu B snapshot\n", n); fail++; return NULL; }
-    bad = pim_memcpy_ctx(c, b, t->base, n, PIM_FROM_DEV, 0);
-    if (bad) { printf("  FAIL: snapshot: %s\n", bad); fail++; free(b); return NULL; }
+    for (uint32_t u = 0; u < pim_tensor_nunits(t); u++) {
+        bad = pim_memcpy_ctx(c, (char *)b + (size_t)u * g->unit_bytes,
+                             pim_tensor_unit_addr(g, t, u), g->unit_bytes, PIM_FROM_DEV, 0);
+        if (bad) { printf("  FAIL: snapshot unit %u: %s\n", u, bad); fail++; free(b); return NULL; }
+    }
     return b;
 }
 
@@ -75,6 +81,8 @@ static uint16_t mark(uint32_t out, uint32_t red)
 // 16 lanes of two bytes with nothing between them — so it pins "beats are densely
 // packed", which the implementation's form would silently survive losing.
 //////////////////////////////////////////////////////////////////////////////////
+// The unit order is the header's table: group outer for OUT_MAJOR, chunk outer for
+// RED_MAJOR.
 static uint64_t expected_offset(const pim_geometry *g, const pim_tensor *t,
                                 uint32_t out, uint32_t red)
 {
@@ -84,21 +92,25 @@ static uint64_t expected_offset(const pim_geometry *g, const pim_tensor *t,
     uint32_t bank  = out % g->nbank;
     uint32_t chunk = red / ELEMS_PER_ROW;
     uint32_t in    = red - chunk * ELEMS_PER_ROW;
+    uint64_t unit  = (t->layout == PIM_LAYOUT_RED_MAJOR)
+                   ? (uint64_t)chunk * (t->noutpad / per) + group
+                   : (uint64_t)group * t->nchunks + chunk;
 
-    return ((uint64_t)group * t->nchunks + chunk) * g->unit_bytes
+    return unit * g->unit_bytes
          + (uint64_t)ch * g->nbank * g->row_bytes
          + (uint64_t)bank * g->row_bytes
          + (uint64_t)in * 2u;
 }
 
-static void addressing_case(pim_ctx *c, uint32_t nout, uint32_t nred, const char *what)
+static void addressing_case(pim_ctx *c, pim_layout layout, uint32_t nout, uint32_t nred,
+                            const char *what)
 {
     const pim_geometry *g = pim_geom_ctx(c);
     pim_tensor  t;
     uint32_t    bad_o = 0, bad_r = 0;
     int         ok = 1;
 
-    pim_tensor_plan(g, PIM_LAYOUT_OUT_MAJOR, nout, nred, &t);
+    pim_tensor_plan(g, layout, nout, nred, &t);
 
     // The last element of the last group's last chunk must be the last byte of the
     // allocation — one element further and every shape here would be over-sized
@@ -263,6 +275,112 @@ out:
 }
 
 //////////////////////////////////////////////////////////////////////////////////
+// 7.  A growable tensor: room is added exactly at its steps, every token lands where
+// its own coordinates say, the zero invariant holds across the allocations, and
+// every allocation carries the one tag.
+//
+// Tokens arrive `batch` at a time and the tensor is grown to fit each batch before
+// it is appended, the way the KV cache does it.  A grow is expected exactly when a
+// batch crosses a multiple of the step: nch*nbank*pack tokens for K, 1024 for V.
+//////////////////////////////////////////////////////////////////////////////////
+static void grow_case(pim_ctx *c, pim_layout layout, uint32_t width, uint32_t ntok,
+                      uint32_t batch, const char *what)
+{
+    const pim_geometry *g = pim_geom_ctx(c);
+    int         kv_out = (layout != PIM_LAYOUT_RED_MAJOR);
+    pim_tensor  t;
+    uint64_t    tag0;
+    uint16_t   *tok, *snap;
+    const char *bad;
+    uint32_t    grows = 0, want_grows = 0, misplaced = 0, tail_bad = 0;
+    uint32_t    step, room_before, split = 0, bad_tag = 0;
+
+    pim_tensor_plan_growable(g, layout, width, &t);
+    CHECK(t.growable && pim_tensor_room(&t) == 0 && pim_tensor_nunits(&t) == 0,
+          "%s: a new growable tensor has room %u and %u unit(s)", what,
+          pim_tensor_room(&t), pim_tensor_nunits(&t));
+    tag0 = t.tag;
+    step = kv_out ? g->nch * g->nbank * t.pack : ELEMS_PER_ROW;
+    tok  = malloc((size_t)batch * width * 2);
+
+    for (uint32_t s0 = 0; s0 < ntok; s0 += batch) {
+        uint32_t n = ntok - s0 < batch ? ntok - s0 : batch;
+
+        room_before = pim_tensor_room(&t);
+        if ((bad = pim_tensor_grow(c, &t, s0 + n))) {
+            CHECK(0, "%s: grow to %u: %s", what, s0 + n, bad); goto out;
+        }
+        if (pim_tensor_room(&t) != room_before) {
+            // Poison what was just added, so "zero" below means "something cleared
+            // it" and not "the pool handed back a zeroed granule".
+            unsigned char *p = malloc(g->unit_bytes);
+            memset(p, FAKE_POISON, g->unit_bytes);
+            for (uint32_t u = 0; u < pim_tensor_nunits(&t); u++) {
+                void *ua = pim_tensor_unit_addr(g, &t, u);
+                uint32_t room_u = kv_out ? (u / t.nchunks + 1) * step
+                                         : (u / t.ngroups + 1) * step;
+                if (room_u > room_before)
+                    CHECK(!pim_memcpy_ctx(c, ua, p, g->unit_bytes, PIM_TO_DEV, 0),
+                          "%s: poison unit %u", what, u);
+            }
+            free(p);
+            grows++;
+        }
+        if (s0 + n > room_before) want_grows++;
+
+        for (uint32_t i = 0; i < n; i++)
+            for (uint32_t d = 0; d < width; d++)
+                tok[(size_t)i * width + d] = mark(s0 + i, d);
+        if ((bad = pim_tensor_append(c, &t, s0, n, tok))) {
+            CHECK(0, "%s: append [%u, %u): %s", what, s0, s0 + n, bad); goto out;
+        }
+    }
+
+    CHECK(grows == want_grows, "%s: %u grow(s), %u batches ran past the room",
+          what, grows, want_grows);
+    CHECK(pim_tensor_room(&t) == (ntok + step - 1) / step * step,
+          "%s: room %u for %u token(s), step %u", what, pim_tensor_room(&t), ntok, step);
+    CHECK(t.tag == tag0, "%s: the tag changed as the tensor grew", what);
+    for (uint32_t i = 0; i < t.npages; i++)
+        if (pim_tag_get_ctx(c, t.pages[i]) != t.tag) bad_tag++;
+    CHECK(bad_tag == 0, "%s: %u of %u allocation(s) do not carry the tensor's tag",
+          what, bad_tag, t.npages);
+    // The point of the unit table: at least one pair of neighbouring units lives in
+    // different allocations.  Otherwise this case would not exercise it.
+    for (uint32_t u = 1; u < pim_tensor_nunits(&t); u++)
+        if ((char *)pim_tensor_unit_addr(g, &t, u) !=
+            (char *)pim_tensor_unit_addr(g, &t, u - 1) + g->unit_bytes) split++;
+    CHECK(t.npages < 2 || split > 0, "%s: %u allocations but every unit is adjacent",
+          what, t.npages);
+
+    if (!(snap = snapshot(c, &t))) goto out;
+    for (uint32_t s = 0; s < ntok; s++)
+        for (uint32_t d = 0; d < width; d++) {
+            uint16_t got = kv_out ? at(c, snap, &t, s, d) : at(c, snap, &t, d, s);
+            if (got != mark(s, d)) misplaced++;
+        }
+    if (!kv_out) {
+        uint32_t cleared = (ntok + ELEMS_PER_ROW - 1) / ELEMS_PER_ROW * ELEMS_PER_ROW;
+        for (uint32_t r = ntok; r < cleared; r++)
+            for (uint32_t o = 0; o < t.noutpad; o++)
+                if (at(c, snap, &t, o, r) != 0) tail_bad++;
+    }
+    CHECK(misplaced == 0, "%s: %u of %llu appended elements landed elsewhere", what,
+          misplaced, (unsigned long long)ntok * width);
+    CHECK(tail_bad == 0, "%s: %u element(s) above the frontier in its chunk are not "
+          "zero", what, tail_bad);
+    printf("     %-19s %5u token(s): %2u grow(s) of %4u, %3u unit(s) in %2u "
+           "allocation(s), %s\n", what, ntok, grows, step, pim_tensor_nunits(&t),
+           t.npages, misplaced || tail_bad ? "MISPLACED" : "all in place");
+    free(snap);
+out:
+    free(tok);
+    pim_tensor_free(c, &t);
+    CHECK(t.npages == 0 && pim_tensor_room(&t) == 0, "%s: free left %u allocation(s)",
+          what, t.npages);
+}
+
+//////////////////////////////////////////////////////////////////////////////////
 int main(void)
 {
     pim_ctx *c = mkctx(2);
@@ -274,13 +392,14 @@ int main(void)
            (unsigned long long)(g->unit_bytes >> 10));
 
     printf("\n  1. addressing, against an independent reading of the rule\n");
-    addressing_case(c, 2048, 1024, "a full row");
-    addressing_case(c, 32,   128,  "attention head");
-    addressing_case(c, 2048, 2048, "two chunks");
-    addressing_case(c, 20,   100,  "both ragged");
-    addressing_case(c, 1,    16,   "one output, one beat");
-    addressing_case(c, 3072, 8192, "3B down_proj");
-    addressing_case(c, 1024, 8192, "3B V cache at S_max 8K");
+    addressing_case(c, PIM_LAYOUT_OUT_MAJOR, 2048, 1024, "a full row");
+    addressing_case(c, PIM_LAYOUT_OUT_MAJOR, 32,   128,  "attention head");
+    addressing_case(c, PIM_LAYOUT_OUT_MAJOR, 2048, 2048, "two chunks");
+    addressing_case(c, PIM_LAYOUT_OUT_MAJOR, 20,   100,  "both ragged");
+    addressing_case(c, PIM_LAYOUT_OUT_MAJOR, 1,    16,   "one output, one beat");
+    addressing_case(c, PIM_LAYOUT_OUT_MAJOR, 3072, 8192, "3B down_proj");
+    addressing_case(c, PIM_LAYOUT_RED_MAJOR, 1024, 8192, "3B V, chunk outer");
+    addressing_case(c, PIM_LAYOUT_RED_MAJOR, 512,  3000, "1B V, ragged");
 
     printf("\n  2. upload places the rectangle and zeroes the rest\n");
     upload_case(c, PIM_LAYOUT_OUT_MAJOR, 64, 100, "OUT_MAJOR ragged");
@@ -407,10 +526,18 @@ int main(void)
                (unsigned long long)b.tag);
     }
 
-    // ---- 7. nothing leaked -------------------------------------------------
+    // ---- 7. a KV cache that grows ------------------------------------------
+    printf("\n  7. a KV cache that grows as tokens arrive\n");
+    grow_case(c, PIM_LAYOUT_OUT_PACKED, 512,  1100, 1, "K 1B, 1 at a time");
+    grow_case(c, PIM_LAYOUT_OUT_PACKED, 1024, 700,  1, "K 3B, 1 at a time");
+    grow_case(c, PIM_LAYOUT_OUT_PACKED, 512,  300,  37, "K 1B, 37 at a time");
+    grow_case(c, PIM_LAYOUT_RED_MAJOR,  512,  2300, 1, "V 1B, 1 at a time");
+    grow_case(c, PIM_LAYOUT_RED_MAJOR,  1024, 2100, 50, "V 3B, 50 at a time");
+
+    // ---- 8. nothing leaked -------------------------------------------------
     pim_pool_trim(c, PIM_MEM_DRAM, true);
     CHECK(out[0] == 0, "%u dram hugepages leaked", out[0]);
-    printf("\n  7. after trim: %u dram hugepages out\n", out[0]);
+    printf("\n  8. after trim: %u dram hugepages out\n", out[0]);
 
     printf("\n%s\n", fail ? "FAILED" : "all checks passed");
     return fail != 0;

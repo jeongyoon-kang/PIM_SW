@@ -26,6 +26,8 @@
 
 #include "pimrt/pim_gemv.h"
 #include "pimrt/pim_logical.h"
+#include "pimrt/pim_matvec.h"
+#include "pimrt/pim_exec.h"
 #include "pim/pim_addr.h"
 
 #include "emu_regs.h"
@@ -48,6 +50,87 @@ static const char *plan(pim_ctx *c, uint32_t n, uint32_t k, pim_tensor *w)
     // (the fds are -1), so the test stamps it the same way.  Doing it by hand is
     // the point of the refusal check further down.
     return pim_tag_set_ctx(c, w->base, pim_tensor_tag(g, w));
+}
+
+// ------------------------------------------------------------------------------
+// A growable tensor, grown one step at a time so its units sit in several
+// allocations: every MAC of a matvec over it must name the card row of the unit that
+// holds its (group, chunk), and the column of the group's slot in that row.
+static void grow_mac_case(pim_ctx *c, pim_layout layout, uint32_t width, uint32_t ntok,
+                          uint32_t out_count, uint32_t red_off, uint32_t red_len,
+                          const char *what)
+{
+    const pim_geometry *g = pim_geom_ctx(c);
+    enum { CAP = 4096 };
+    static pim_isr  li[CAP], lo[CAP];
+    static pim_ref  lr[CAP];
+    static pim_atom la[CAP / 2];
+    pim_logical lp;
+    pim_prog    prog;
+    pim_tensor  t;
+    uint32_t    step, beats, nck, nmac = 0, badrow = 0, badcol = 0;
+    uint64_t    vtag = 0x7465737476656374ull;       /* any nonzero value */
+    size_t      xbytes, ybytes;
+    void       *x = NULL, *y = NULL;
+    const char *bad;
+
+    pim_tensor_plan_growable(g, layout, width, &t);
+    step = (layout == PIM_LAYOUT_RED_MAJOR) ? 1024u : g->nch * g->nbank * t.pack;
+    for (uint32_t n = step; n < ntok + step; n += step)
+        if ((bad = pim_tensor_grow(c, &t, n))) { CHECK(0, "%s: grow: %s", what, bad); goto out; }
+    if (layout != PIM_LAYOUT_RED_MAJOR && !out_count) out_count = pim_tensor_groups(&t, ntok);
+    if (layout == PIM_LAYOUT_RED_MAJOR && !out_count) out_count = t.ngroups;
+
+    beats  = pim_matvec_beats(red_off, red_len);
+    xbytes = (size_t)beats * 32;
+    ybytes = (size_t)out_count * g->nch * 32;
+    x = pim_alloc_ctx(c, xbytes, PIM_MEM_GPR);
+    y = pim_alloc_ctx(c, ybytes, PIM_MEM_GPR);
+    CHECK(x && y, "%s: GPR allocation", what);
+    if (!x || !y) goto out;
+    pim_tag_set_ctx(c, x, vtag);
+
+    pim_logical_init(&lp, li, CAP, lr, CAP, la, CAP / 2, g->nch, 1);
+    if ((bad = pim_matvec_logical(g, &t, 0, out_count, red_off, red_len, x, xbytes, vtag,
+                                  y, ybytes, PIM_ACC_SINGLE, &lp))) {
+        CHECK(0, "%s: build: %s", what, bad); goto out;
+    }
+    pim_prog_init(&prog, lo, CAP);
+    if ((bad = pim_prog_lower_ctx(c, &lp, &prog, 0))) {
+        CHECK(0, "%s: lower: %s", what, bad); goto out;
+    }
+
+    // The builder's order: group outer, chunk inner.
+    nck = (red_off + red_len + 1023) / 1024 - red_off / 1024;
+    for (uint32_t i = 0; i < prog.n; i++) {
+        pim_isr_info in;
+        uint32_t grp, ck, unit, want_col;
+        pim_unit un;
+
+        pim_isr_decode(&prog.w[i], &in);
+        if (in.opcode != PIM_OP_MAC) continue;
+        grp  = nmac / nck;
+        ck   = red_off / 1024 + nmac % nck;
+        unit = pim_tensor_unit(&t, grp, ck);
+        nmac++;
+        if (pim_addr_unit_ctx(c, pim_tensor_unit_addr(g, &t, unit), g->unit_bytes, 0, &un)
+            || in.row != un.row)
+            badrow++;
+        want_col = ((ck == red_off / 1024) ? (red_off % 1024) / 16 : 0)
+                 + pim_tensor_row_off(&t, grp) / 16;
+        if (in.col != want_col) badcol++;
+    }
+    CHECK(nmac == out_count * nck, "%s: %u MAC(s), expected %u", what, nmac, out_count * nck);
+    CHECK(badrow == 0, "%s: %u of %u MAC(s) name a row that is not their unit's", what,
+          badrow, nmac);
+    CHECK(badcol == 0, "%s: %u of %u MAC(s) have the wrong column", what, badcol, nmac);
+    printf("  %-26s %3u unit(s) in %2u allocation(s): %4u MAC(s), rows %s, columns %s\n",
+           what, pim_tensor_nunits(&t), t.npages, nmac, badrow ? "WRONG" : "ok",
+           badcol ? "WRONG" : "ok");
+out:
+    if (x) pim_free_ctx(c, x);
+    if (y) pim_free_ctx(c, y);
+    pim_tensor_free(c, &t);
 }
 
 // ------------------------------------------------------------------------------
@@ -318,6 +401,12 @@ int main(void)
               "PIM_LOWER_ALLOW_T did not let it through");
         pim_free_ctx(c, x3); pim_free_ctx(c, y3); pim_free_ctx(c, w2.base);
     }
+
+    printf("\ngrowable KV tensors\n");
+    grow_mac_case(c, PIM_LAYOUT_RED_MAJOR,  512,  2500, 0, 0,   2500, "S.V, V 1B, 3 chunks");
+    grow_mac_case(c, PIM_LAYOUT_RED_MAJOR,  1024, 1500, 4, 0,   1500, "S.V, V 3B, one head");
+    grow_mac_case(c, PIM_LAYOUT_OUT_PACKED, 512,  300,  0, 64,  64,   "q.K, K 1B, head 1");
+    grow_mac_case(c, PIM_LAYOUT_OUT_PACKED, 1024, 200,  0, 896, 128,  "q.K, K 3B, head 7");
 
     printf("\n%s\n", fail ? "FAILED" : "all checks passed");
     return fail ? 1 : 0;

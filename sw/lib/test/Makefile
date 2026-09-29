@@ -27,13 +27,15 @@ HWDEF   := ../../../hwdef
 # libpim's public API, so it needs nothing else.
 LIB     := ../pim_alloc.c ../pim_geom.c ../pim_addr.c
 
-.PHONY: all run clean
+.PHONY: all run clean FORCE
 all: geom_test pool_test lower_test eager_test tensor_test
 
-# hwdef is compiled with whatever platform/active says; go through
-# scripts/setup.sh if you want a different one compared.
-geom_test: geom_test.c ../pim_geom.c $(HWDEF)/pim_platform.c
-	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $^ -lm
+# hwdef is compiled for platform/config, through the pim_config.h hwdef/ generates.
+geom_test: geom_test.c ../pim_geom.c $(HWDEF)/pim_platform.c $(HWDEF)/pim_config.h
+	$(CC) $(CFLAGS) -I$(HWDEF) -o $@ $(filter %.c,$^) -lm
+
+$(HWDEF)/pim_config.h: FORCE
+	$(MAKE) -C $(HWDEF) pim_config.h
 
 pool_test: pool_test.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
