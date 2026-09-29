@@ -5,8 +5,8 @@
 
 ## 빌드
 
-`make` 를 직접 돌리지 말 것. `pim_config.h` 의 컴파일 기본값(ch4)이 들어가서 보드와
-주소 체계가 어긋나고, DMA 가 거부되어 프로그램이 즉시 죽는다.
+`make` 를 직접 돌리지 말 것. 그러면 `pim_config.h` 의 컴파일 기본값(ch2)으로 빌드되고,
+그런 빌드는 `pim_platform_check()` 가 실행을 거부한다. 빌드는 `setup.sh` 로 한다.
 
 ```bash
 cd emulator_top

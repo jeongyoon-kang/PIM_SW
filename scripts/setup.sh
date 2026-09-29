@@ -48,7 +48,7 @@
 # HOW THE VALUES GET IN
 # `hwdef/gen_config.sh --defs` turns the selected conf into a -D list and this
 # script passes it to all four makes as PIM_DEFS.  hwdef/pim_config.h holds a
-# DEFAULT for every value (ch4) so a bare `make` still compiles — but such a build
+# DEFAULT for every value (ch2) so a bare `make` still compiles — but such a build
 # leaves PIM_CONFIG_FROM_CONF at 0 and pim_platform_check() then REFUSES to run it.
 # The defaults are there to keep the tree buildable, not to be used.
 #
@@ -127,7 +127,7 @@ status() {
         fi
         # What the BINARIES were built for, which is a different question now: the
         # values live in -D, so nothing in the tree records them.  `cat pim_config.h`
-        # answers "ch4" forever regardless of what was built.
+        # answers "ch2" forever regardless of what was built.
         local b="UNKNOWN"
         [[ -r "$PLATFORM_DIR/.built" ]] && b="$(sed -n '1p' "$PLATFORM_DIR/.built")"
         if [[ "$b" == "$t" ]]; then
@@ -200,7 +200,7 @@ if [[ -n "$WANT" ]]; then
 
         # ...and whether anything was built behind this script's back.  The stamp is
         # written AFTER the makes, so every artifact should be OLDER than it.  One
-        # that is newer came from a bare `make`, which compiled the ch4 defaults —
+        # that is newer came from a bare `make`, which compiled the ch2 defaults —
         # and since PIM_DEFS is unchanged, make would consider those objects current
         # and leave them in place.  The tree would keep refusing to start with no
         # obvious way out.

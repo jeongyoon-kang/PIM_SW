@@ -4,7 +4,7 @@
 //
 // The values come from platform/<name>.conf via `hwdef/gen_config.sh --defs`, which
 // scripts/setup.sh turns into -D arguments for the whole build.  pim_config.h holds
-// a default for each one (ch4) so a bare `make` still compiles; PIM_CONFIG_FROM_CONF
+// a default for each one (ch2) so a bare `make` still compiles; PIM_CONFIG_FROM_CONF
 // records which of the two happened, and pim_platform_check() refuses the defaults.  They are fixed for as long as one bitstream is on the board, so
 // there is nothing to load, nothing to pass around, and nothing to get wrong at
 // run time — the same status PIM_NBANK and the 256 b geometry always had.  There

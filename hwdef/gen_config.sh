@@ -11,12 +11,12 @@
 # never change while a board is programmed.  So the numbers are baked in instead.
 #
 # What changed is only HOW they get baked in: pim_config.h is now static source
-# carrying ch4 defaults, and this script emits the -D list that overrides them.  The
+# carrying ch2 defaults, and this script emits the -D list that overrides them.  The
 # conf-key-to-macro-name mapping lives HERE and nowhere else — putting it in setup.sh
 # would make two copies of it, and the ones that differ in name (HBM_BANK_STRIDE ->
 # PIM_BANK_STRIDE, MC_SPAN -> PIM_MC_CH_SPAN) are exactly where a second copy rots.
 #
-# --header is a hand tool for refreshing the defaults in pim_config.h when ch4's conf
+# --header is a hand tool for refreshing the defaults in pim_config.h when ch2's conf
 # changes.  No Makefile calls it; nothing consumes its output automatically.
 #
 # THE TYPE SUFFIXES ARE NOT DECORATION.  ULL on the addresses and u on the counts
@@ -57,7 +57,7 @@ source "$CONF"
 
 # EVERY key, every time — including the ones that are identical in all three confs
 # today.  Emitting only what differs would mean a conf that changes OFF_VIOL (ch1.conf
-# already warns that it might) silently keeps the ch4 default instead.
+# already warns that it might) silently keeps the ch2 default instead.
 req() { [[ -n "${!1:-}" ]] || { echo "gen_config.sh: $CONF has no $1" >&2; exit 2; }; }
 for k in NCH NBANK BAR2_AXI_BASE OFF_GPR OFF_CFR OFF_VIOL OFF_IMEM \
          HBM_BASE HBM_CH_SPAN HBM_BANK_STRIDE BANK_WINDOW \

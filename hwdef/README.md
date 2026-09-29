@@ -155,7 +155,7 @@ CFR 은 `addr[7:0]` 만 디코드한다 — 4 KB 안에서 **256 B 마다 반복
 |---|---|---|
 | `emu_regs.h` | 0 | **이미지마다 같은 것만** — BAR2 제어 평면, 256 b geometry, ISR 인코딩 |
 | `pim_platform.{h,c}` | 0 | **이미지마다 다른 것 전부** — 채널 수, bank stride/window, MC base, 정책. 전부 **컴파일 상수**다 (아래 참조). `runtime/libpim.so` 도 이 파일을 링크한다 |
-| `pim_config.h` | 0 | 그 상수들의 **정적 기본값(ch4)**. `#ifndef` 가드가 걸려 있어 `-D` 로 덮인다 |
+| `pim_config.h` | 0 | 그 상수들의 **정적 기본값(ch2)**. `#ifndef` 가드가 걸려 있어 `-D` 로 덮인다 |
 | `gen_config.sh` | 0 | 활성 `.conf` → `--defs` 로 `-D` 목록 출력. conf 키↔매크로 매핑이 사는 유일한 곳 |
 | `../platform/select.sh` | 0 | 어느 `.conf` 가 활성인지 결정. `reprogram.sh` 와 `setup_permissions.sh` 가 source 한다 (`setup.sh` 는 conf 를 직접 읽는다) |
 | `../platform/common.conf` | 0 | 보드 값 (BDF, 드라이버, 큐, 권한) |
@@ -177,19 +177,20 @@ CFR 은 `addr[7:0]` 만 디코드한다 — 4 KB 안에서 **256 B 마다 반복
 | `../runtime/test/load_test.c` | **3** | **실제 행렬을 올리고 그걸로 GEMV.** 되읽기(배치) + GEMV(ISA가 보는 위치) 두 검사 |
 
 ```sh
-../../scripts/setup.sh --platform ch2      # 선택 + 전체 재빌드.  이것만 쓴다
+sudo ../scripts/reprogram.sh --ch 2       # 보드에 ch2 이미지를 올리고 platform/active 를 ch2 로
+../scripts/setup.sh                       # active conf 로 전체 재빌드.  빌드는 이것만 쓴다
 ```
 
 **채널 수·stride·window 는 컴파일 상수다.** `setup.sh` 가 활성 conf 를
 `gen_config.sh --defs` 로 `-D` 목록으로 만들어 네 번의 make 에 넘긴다. `pim_config.h`
-에 ch4 기본값이 `#ifndef` 로 들어 있어 맨손 `make` 도 컴파일은 되지만, 그런 빌드는
+에 ch2 기본값이 `#ifndef` 로 들어 있어 맨손 `make` 도 컴파일은 되지만, 그런 빌드는
 `PIM_CONFIG_FROM_CONF` 가 0 이라 **모든 도구가 실행을 거부한다** — 아무도 고르지 않은
 채널 수로 도는 것이 가장 나쁜 실패이기 때문이다.
 
 `-D` 는 make 가 못 본다. 그래서 `setup.sh` 는 상수가 바뀌었으면(또는 이 스크립트를
 거치지 않고 빌드된 흔적이 있으면) **`clean` 을 먼저** 하고, 성공한 뒤에만
 `platform/.built` 에 무엇으로 빌드했는지 남긴다. `--status` 가 그걸 읽어 활성 conf 와
-대조한다 — `cat pim_config.h` 는 이제 항상 ch4 라고 답하므로 그 자리를 대신할 것이
+대조한다 — `cat pim_config.h` 는 이제 항상 ch2 라고 답하므로 그 자리를 대신할 것이
 필요하다.
 
 도구마다 첫 두 줄에 무엇으로 빌드됐는지 찍는다:

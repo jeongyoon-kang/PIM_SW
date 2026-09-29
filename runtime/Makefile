@@ -15,7 +15,7 @@
 
 CC      ?= gcc
 CFLAGS  ?= -Wall -Wextra -Werror -std=c11 -O2 -g -fPIC -I../hwdef
-# See hwdef/Makefile.  A bare `make` here compiles the ch4 defaults; go through
+# See hwdef/Makefile.  A bare `make` here compiles the ch2 defaults; go through
 # scripts/setup.sh --platform chN so these arrive.
 override CFLAGS += $(PIM_DEFS)
 LDLIBS  ?= -lm -ldl          # hwdef no longer needs -ldl: the platform is compiled in, not discovered

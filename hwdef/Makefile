@@ -25,7 +25,7 @@ AR      ?= ar
 
 # The platform constants arrive here, from scripts/setup.sh via gen_config.sh --defs.
 # `override` because CFLAGS is ?= and a caller who sets it on the command line would
-# otherwise drop this whole line — silently building the ch4 defaults instead.
+# otherwise drop this whole line — silently building the ch2 defaults instead.
 override CFLAGS += $(PIM_DEFS)
 
 SRC  := pim_platform.c
@@ -48,7 +48,7 @@ libhwdef.a: $(OBJ)
 test: libhwdef.a
 	$(MAKE) -C test
 
-# pim_config.h is NOT listed here.  It is source now — carrying the ch4 defaults that
+# pim_config.h is NOT listed here.  It is source now — carrying the ch2 defaults that
 # -D overrides — and setup.sh runs `clean` before every platform switch, so deleting
 # it here would take out the header on the first switch and there is nothing to
 # regenerate it from.
