@@ -24,7 +24,7 @@ FPGA 위의 PIM 에뮬레이터(HBM 2채널 × 16뱅크)에 비트스트림을 �
 | 카드 PCIe 주소 | `0000:01:00.0` (`lspci -nn \| grep -i xilinx` 로 확인) | `BDF=...` |
 | 카드 접근 그룹 | `plugdev` | `GROUP=...` |
 | 커널 헤더 | `/lib/modules/$(uname -r)/build` | `sw/drv` 에서 `KDIR=...` |
-| Python (앱만) | `torch`, `transformers`, `pybind11` | `make PYTHON=...` |
+| Python (앱만) | conda 환경 `pim` — [`sw/app/environment.yml`](sw/app/environment.yml) | `make PYTHON=...` |
 
 기본값은 [`platform/common.conf`](platform/common.conf) 에 모여 있고, 표의 환경 변수로
 한 번씩 덮을 수 있다.
@@ -147,6 +147,18 @@ cat /proc/pim                 # DRAM·GPR 두 pool 상태
 
 ### Python 앱
 
+version1.0 때 쓰던 conda 환경을 그대로 고정해 둔 파일로 만든다. Python 3.11.15,
+torch 2.13.0+cpu, transformers 5.14.1, pybind11 3.1.0 을 포함해 모든 패키지의 버전이
+당시와 같다 (linux-64).
+
+```sh
+conda env create -f sw/app/environment.yml     # 환경 이름: pim
+conda activate pim
+```
+
+torch 는 CPU 전용 빌드라 PyTorch CPU 인덱스에서 받는다. 파일 안의
+`--extra-index-url` 줄이 그 주소를 pip 에 알려 준다.
+
 ```sh
 cd sw/app
 make PYTHON=$(which python)                              # _pim.so 바인딩
@@ -176,6 +188,7 @@ scripts/setup.sh
 hwdef/test/emu_sanity && hwdef/test/emu_gemv --chs 0,1
 
 # LLM
+conda env create -f sw/app/environment.yml && conda activate pim     # 한 번만
 make -C sw && make -C sw drv && make -C sw/drv load CH=2 MAP=1
 cd sw/app && make PYTHON=$(which python) && ./generate.py --model llama-3.2-1b
 ```
