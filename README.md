@@ -14,26 +14,20 @@ FPGA 위의 PIM 에뮬레이터(HBM 2채널 × 16뱅크)에 비트스트림을 �
 
 ---
 
-## 0. 준비물
+## 0. 의존성
 
 | 항목 | 기본 경로 / 값 | 바꾸는 법 |
 |---|---|---|
-| Vivado 2025.2 | `/tools/Xilinx/2025.2/Vivado/settings64.sh` | `VIVADO_SETTINGS=...` |
-| JTAG 프로그래밍 Tcl | `/home/kjy/pim/bank_controller/program.tcl` (이 저장소 밖) | `PROGRAM_TCL=...` 또는 `--tcl FILE` |
 | QDMA 드라이버 빌드 트리 | `/home/kjy/pim/dma_ip_drivers/QDMA/linux-kernel` (이 저장소 밖) | `QDMA_TREE=...` |
 | 카드 PCIe 주소 | `0000:01:00.0` (`lspci -nn \| grep -i xilinx` 로 확인) | `BDF=...` |
-| 카드 접근 그룹 | `plugdev` | `GROUP=...` |
-| 커널 헤더 | `/lib/modules/$(uname -r)/build` | `sw/drv` 에서 `KDIR=...` |
 | Python (앱만) | conda 환경 `pim` — [`sw/app/environment.yml`](sw/app/environment.yml) | `make PYTHON=...` |
 
 기본값은 [`platform/common.conf`](platform/common.conf) 에 모여 있고, 표의 환경 변수로
 한 번씩 덮을 수 있다.
 
-QDMA 드라이버는 설치하지 않고 빌드 트리에서 바로 쓴다. 처음 한 번 빌드해 둔다.
+QDMA 드라이버 초기에 별도 설치할 것.
 
-```sh
-make -C /home/kjy/pim/dma_ip_drivers/QDMA/linux-kernel
-```
+
 
 ## 1. 한 번만: 카드 접근 권한
 
@@ -46,6 +40,7 @@ scripts/setup_permissions.sh --check      # 확인만
 ```
 
 ## 2. HW: ch2 이미지 프로그래밍
+Main PC Cold Boot한 상태라면 Vivado HW Manager 열고 PDI 적재 후, 재부팅할 것.
 
 ```sh
 sudo scripts/reprogram.sh --ch 2
@@ -80,8 +75,7 @@ scripts/reprogram.sh --ch 2 --select-only
 > ```
 >
 > 로 빌드한 뒤 [`scripts/qdma_queues.sh`](scripts/qdma_queues.sh) 의 `QDMA_TREE=` 기본값을
-> 그 `QDMA/linux-kernel` 경로로 고친다. `sudo` 가 환경 변수를 지우므로
-> `QDMA_TREE=... sudo ...` 로는 전달되지 않는다.
+> 그 `QDMA/linux-kernel` 경로로 고친다.
 
 ```sh
 sudo scripts/qdma_queues.sh setup     # 드라이버 insmod + MM 큐 쌍 생성
@@ -103,11 +97,7 @@ scripts/setup.sh --status             # 무엇이 선택됐고 무엇으로 빌�
 - 상수가 바뀌었으면 먼저 `clean` 한다.
 - 빌드가 끝나면 `hwdef/test/emu_sanity` 를 실행해 보드의 채널 주소 방식 레지스터를
   ch2.conf 의 `ADDR_MAP=2`(RoChBaCo, 32 KiB 마다 채널이 바뀜)로 맞춘다.
-  카드가 아직 없으면 빌드는 성공으로 두고 그 사실만 알려 준다.
-
-`make` 를 각 디렉토리에서 직접 돌리지 않는다. 그렇게 만든 바이너리는
-[`hwdef/pim_config.h`](hwdef/pim_config.h) 의 기본값으로 컴파일되고, 실행할 때
-`pim_platform_check()` 가 거부한다.
+  
 
 2~4단계를 한 번에: `sudo scripts/reprogram.sh --ch 2 && sudo scripts/setup.sh --all`
 (`--all` 은 빌드에 더해 큐 생성과 권한 적용까지 한다).
@@ -128,7 +118,7 @@ cd hwdef/test
 ./emu_gpr_loop                # GPR 4 MiB 를 QDMA 로 쓰고 되읽기
 ./emu_hbm_direct --ch 0,1     # 두 채널 16뱅크 창에 각각 닿나
 ./emu_gemv --chs 0,1          # 두 채널 GEMV 타일, 16 lane 검증
-./emu_ewmul --ch 0            # EWMUL 한 조
+./emu_ewmul --ch 0            # EWMUL 
 ./emu_chain --test all        # 한 ISR 프로그램 안의 조합
 cd ../..
 
@@ -155,15 +145,10 @@ sudo make -C sw/drv load CH=2 MAP=1   # insmod + dmesg 라 root 가 필요하다
 cat /proc/pim                 # DRAM·GPR 두 pool 상태
 ```
 
-`sudo` 없이 돌리면 안쪽 `sudo insmod` 는 비밀번호를 물어 올라가지만, 이어지는
-`dmesg` 가 `Operation not permitted` 로 실패해 로드 결과가 안 보인다. 처음부터
-`sudo make` 로 돌린다.
-
 - `CH=2` 가 채널 수다. 이 스택은 채널 수를 빌드가 아니라 이 인자로 받는다.
 - `MAP=1` 은 드라이버 쪽 표기로 RoChBaCo 다. 4단계에서 보드에 건 주소 방식과 같아야
   하고, 이 스택은 RoChBaCo 만 받는다. 다르면 `libpimrt` 가 열 때 거부하며 어느 쪽을
   맞추라고 알려 준다.
-- 내릴 때: `sudo make -C sw/drv unload` (또는 `sudo rmmod pim`)
 
 ### Python 앱
 
@@ -176,8 +161,7 @@ conda env create -f sw/app/environment.yml     # 환경 이름: pim
 conda activate pim
 ```
 
-torch 는 CPU 전용 빌드라 PyTorch CPU 인덱스에서 받는다. 파일 안의
-`--extra-index-url` 줄이 그 주소를 pip 에 알려 준다.
+
 
 ```sh
 cd sw/app
