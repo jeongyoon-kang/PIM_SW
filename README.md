@@ -67,6 +67,22 @@ scripts/reprogram.sh --ch 2 --select-only
 
 ## 3. QDMA 큐
 
+> **먼저: Xilinx QDMA 드라이버를 받아 빌드하고, 그 경로로 스크립트를 고쳐야 한다.**
+> `qdma_queues.sh` 는 드라이버를 이 저장소에 담지 않고, Xilinx 의
+> [dma_ip_drivers](https://github.com/Xilinx/dma_ip_drivers) 빌드 트리에서
+> `bin/qdma-pf.ko` 와 `bin/dma-ctl` 을 그대로 가져다 쓴다. 기본 경로
+> (`/home/kjy/pim/dma_ip_drivers/QDMA/linux-kernel`)는 원래 작업 머신의 것이므로,
+> 다른 머신에서는
+>
+> ```sh
+> git clone https://github.com/Xilinx/dma_ip_drivers.git
+> make -C dma_ip_drivers/QDMA/linux-kernel      # bin/ 에 qdma-pf.ko, dma-ctl 이 생긴다
+> ```
+>
+> 로 빌드한 뒤 [`scripts/qdma_queues.sh`](scripts/qdma_queues.sh) 의 `QDMA_TREE=` 기본값을
+> 그 `QDMA/linux-kernel` 경로로 고친다. `sudo` 가 환경 변수를 지우므로
+> `QDMA_TREE=... sudo ...` 로는 전달되지 않는다.
+
 ```sh
 sudo scripts/qdma_queues.sh setup     # 드라이버 insmod + MM 큐 쌍 생성
 scripts/qdma_queues.sh status         # 확인
@@ -135,15 +151,19 @@ make -C sw drv                # pim.ko
 ### 드라이버 로드 (ch2)
 
 ```sh
-make -C sw/drv load CH=2 MAP=1
+sudo make -C sw/drv load CH=2 MAP=1   # insmod + dmesg 라 root 가 필요하다
 cat /proc/pim                 # DRAM·GPR 두 pool 상태
 ```
+
+`sudo` 없이 돌리면 안쪽 `sudo insmod` 는 비밀번호를 물어 올라가지만, 이어지는
+`dmesg` 가 `Operation not permitted` 로 실패해 로드 결과가 안 보인다. 처음부터
+`sudo make` 로 돌린다.
 
 - `CH=2` 가 채널 수다. 이 스택은 채널 수를 빌드가 아니라 이 인자로 받는다.
 - `MAP=1` 은 드라이버 쪽 표기로 RoChBaCo 다. 4단계에서 보드에 건 주소 방식과 같아야
   하고, 이 스택은 RoChBaCo 만 받는다. 다르면 `libpimrt` 가 열 때 거부하며 어느 쪽을
   맞추라고 알려 준다.
-- 내릴 때: `make -C sw/drv unload`
+- 내릴 때: `sudo make -C sw/drv unload` (또는 `sudo rmmod pim`)
 
 ### Python 앱
 
@@ -172,6 +192,20 @@ make check                                               # import 되고 geometr
 모델은 Hugging Face 에서 받는다. Llama 3.2 는 접근 승인이 필요한 모델이라
 `huggingface-cli login` 이 되어 있어야 한다.
 
+### 성능 측정 (decode tok/s)
+
+Instruct 모델 두 개로 512 토큰씩 생성해, prefill 을 뺀 decoding 단계의 속도를 쟀다.
+보드 DRAM 타이밍을 `emu_timing` base ×3 으로 둔 에뮬레이터 수치다.
+
+| 모델 | decode tok/s | 토큰당 시간 (중앙값) |
+|---|---|---|
+| Llama-3.2-1B-Instruct | 2.53 | 0.39 s |
+| Llama-3.2-3B-Instruct | 0.97 | 1.02 s |
+
+조건 (타이밍 값과 거는 순서, 프롬프트, 환경), prefill 과 decode 를 가르는 법, 다시 재는
+명령, 그리고 이 숫자를 읽을 때 주의할 점은
+[`docs/perf_decode_tps.md`](docs/perf_decode_tps.md) 에 있다.
+
 ---
 
 ## 순서 요약
@@ -189,7 +223,7 @@ hwdef/test/emu_sanity && hwdef/test/emu_gemv --chs 0,1
 
 # LLM
 conda env create -f sw/app/environment.yml && conda activate pim     # 한 번만
-make -C sw && make -C sw drv && make -C sw/drv load CH=2 MAP=1
+make -C sw && make -C sw drv && sudo make -C sw/drv load CH=2 MAP=1
 cd sw/app && make PYTHON=$(which python) && ./generate.py --model llama-3.2-1b
 ```
 
@@ -202,5 +236,5 @@ scripts/             reprogram.sh, qdma_queues.sh, setup.sh, setup_permissions.s
 hwdef/               레지스터 정의·플랫폼 상수 (libhwdef.a) 와 보드 검증 프로그램 (test/)
 runtime/             libpim.so — 할당·배치·스케줄·전송
 sw/                  pim.ko + libpim + libpimrt + Python 앱
-docs/                LLM 스택 제안서
+docs/                LLM 스택 제안서, decode 속도 측정 (perf_decode_tps.md)
 ```

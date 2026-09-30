@@ -45,7 +45,7 @@ driver 를 전혀 필요로 하지 않는다 — 공유하는 것이 헤더 하�
 ## 2. 실행 준비
 
 ```sh
-cd drv && make load CH=4        # insmod pim.ko pim_channels=4 ...
+cd drv && sudo make load CH=4   # insmod pim.ko pim_channels=4 ...  (root 필요)
 cat /proc/pim                   # 두 pool 의 장부 상태
 ../../scripts/qdma_queues.sh setup
 ```
