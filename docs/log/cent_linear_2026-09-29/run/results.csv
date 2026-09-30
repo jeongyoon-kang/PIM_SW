@@ -1,0 +1,15 @@
+latch,op,board,sim,diff_pct,cmds_same,rows_same,chunks_same,unit_same,unit,repeats,unit_rows,row_step,regular,board_cols,board_t_unit,sim_board_rows,isrs,source,layers,board_min,board_max
+1,q_proj,323789,323229,0.173,True,True,True,True,VMVMRR,64,"+0,1",2,True,0,000000,323229,384,CENT reuse-bank,16,323789,323789
+1,k_proj,80861,80877,-0.02,True,True,True,True,VMVMRR,16,"+0,1",2,True,0,000000,80877,96,CENT reuse-bank,16,80861,80861
+1,v_proj,80861,80877,-0.02,True,True,True,True,VMVMRR,16,"+0,1",2,True,0,000000,80877,96,CENT reuse-bank,16,80861,80861
+1,o_proj,323789,323229,0.173,True,True,True,True,VMVMRR,64,"+0,1",2,True,0,000000,323229,384,CENT reuse-bank,16,323789,323789
+1,gate_proj,1295501,1292637,0.222,True,True,True,True,VMVMRR,256,"+0,1",2,True,0,000000,1292637,1536,CENT reuse-bank,16,1295501,1295501
+1,up_proj,1295501,1292637,0.222,True,True,True,True,VMVMRR,256,"+0,1",2,True,0,000000,1292637,1536,CENT reuse-bank,16,1295501,1295501
+1,down_proj,1252301,1248669,0.291,True,True,True,True,VMVMVMVMVMVMVMVMRR,64,"+0,1,2,3,4,5,6,7",8,True,0,000000000000000000,1248669,1152,CENT reuse-bank,16,1252301,1252301
+2,q_proj,234861,234685,0.075,True,True,True,True,VMMVMMRRRR,32,"+0,2,1,3",4,True,0,0010010011,234685,320,CENT reuse-bank,16,234861,234861
+2,k_proj,58629,58741,-0.191,True,True,True,True,VMMVMMRRRR,8,"+0,2,1,3",4,True,0,0010010011,58741,80,CENT reuse-bank,16,58629,58629
+2,v_proj,58629,58741,-0.191,True,True,True,True,VMMVMMRRRR,8,"+0,2,1,3",4,True,0,0010010011,58741,80,CENT reuse-bank,16,58629,58629
+2,o_proj,234861,234685,0.075,True,True,True,True,VMMVMMRRRR,32,"+0,2,1,3",4,True,0,0010010011,234685,320,CENT reuse-bank,16,234861,234861
+2,gate_proj,939789,938461,0.142,True,True,True,True,VMMVMMRRRR,128,"+0,2,1,3",4,True,0,0010010011,938461,1280,own (both latches),16,939789,939789
+2,up_proj,939789,938461,0.142,True,True,True,True,VMMVMMRRRR,128,"+0,2,1,3",4,True,0,0010010011,938461,1280,CENT reuse-bank,16,939789,939789
+2,down_proj,916845,915133,0.187,True,True,True,True,VMMVMMVMMVMMVMMVMMVMMVMMRRRR,32,"+0,8,1,9,2,10,3,11,4,12,5,13,6,14,7,15",16,True,0,0010010010010010010010010011,915133,896,CENT reuse-bank,16,916845,916845

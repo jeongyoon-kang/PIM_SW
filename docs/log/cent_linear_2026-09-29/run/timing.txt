@@ -1,0 +1,11 @@
+faw=112
+rrd=28
+rcd=105
+ccd=14
+rtp=28
+rp=105
+wr=196
+ras=238
+mod=210
+rpab=119
+gb=14

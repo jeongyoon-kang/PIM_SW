@@ -1,0 +1,49 @@
+Frontend:
+  impl: AiMTrace
+  clock_ratio: 1
+  
+  Translation:
+    impl: NoTranslation
+    max_addr: 2147483648
+              
+
+MemorySystem:
+  impl: AiMDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: GDDR6
+    org:
+      preset: GDDR6_AiM_org
+    timing:
+      preset: GDDR6_AiM_timing 
+      nRCDRD: 105
+      nRCDRDMAC: 105
+      nRCDEWMUL: 105
+      nRCDRDAF: 105
+      nRCDRDCP: 105
+      nRCDWR: 105
+      nRCDWRCP: 105
+      nCCDL: 14
+      nCCDS: 14
+      nRTP: 28
+      nRAS: 238
+      nRP: 119
+      nMODCH: 210
+      nRRDS: 28
+      nRRDL: 28
+      nFAW: 112
+      nWR: 188
+      nRC: 357
+
+  Controller:
+    impl: AiM
+    clock_ratio: 1
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: AllBank
+    plugins:
+
+  AddrMapper:
+    impl: RoBaRaCoCh
