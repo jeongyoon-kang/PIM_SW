@@ -188,7 +188,7 @@ class Runtime:
     threads, the same way pim_ctx is not shared."""
 
     def __init__(self, max_red: int, max_out_groups: int,
-                 allow_t_latch: bool = False, max_batch: int = 1,
+                 dual_latch: bool = False, max_batch: int = 1,
                  vec_bytes: int = 0, res_bytes: int = 0):
         # The DRAM timing registers are NOT set here.  hwdef/test/emu_timing owns
         # them; opening an engine reads them and refuses on T_CCD < 2.
@@ -196,27 +196,42 @@ class Runtime:
         # vec_bytes/res_bytes are the GPR a stacked program may spend on its
         # pieces.  Left at 0 they are derived from max_red, which reserves the FFN's
         # 16 KiB for an attention query of 128 B — see include/pimrt/pim_op.h.
-        self._r = _pim.Runtime(max_red, max_out_groups, allow_t_latch, max_batch,
+        #
+        # dual_latch makes every matvec and batch use both accumulator latches of a
+        # bank (ISR[35]): output groups run in pairs, one per latch, and a pair
+        # shares its vector loads.  The image must decode ISR[35];
+        # runtime/test/tlatch_test checks that.
+        self._r = _pim.Runtime(max_red, max_out_groups, dual_latch, max_batch,
                                vec_bytes, res_bytes)
+        self.dual_latch = dual_latch
+        self.mode = ACC_DUAL if dual_latch else ACC_SINGLE
         self.max_batch = max_batch
+        # The IsaTrace recording this runtime's launches, when there is one.  The
+        # model's layers read it to label their launches.
+        self.tracer = None
         g = _pim.geometry()
         self.nch, self.nbank = g["nch"], g["nbank"]
         self.per_group = self.nch * self.nbank
+        self.row_elems = g["row_bytes"] // 2          # BF16 in one DRAM row
 
     def matvec(self, m: Tensor, v: torch.Tensor, *, out_first: int = 0,
                out_count: int | None = None, red_off: int = 0,
-               red_len: int | None = None, mode: int = ACC_SINGLE,
+               red_len: int | None = None, mode: int | None = None,
                out: torch.Tensor | None = None) -> torch.Tensor:
         """y = m[.][red_off : red_off+red_len] @ v
 
         THE RETURNED TENSOR INCLUDES THE PADDING OUTPUTS of the last supergroup,
         because the hardware writes them and pretending otherwise would mean a copy
         on every call.  Slice to your real output count; for a linear layer that is
-        `[:weight.shape[0]]`."""
+        `[:weight.shape[0]]`.
+
+        `mode` is ACC_SINGLE or ACC_DUAL; left out, it is the runtime's."""
         if out_count is None:
             out_count = m.ngroups - out_first
         if red_len is None:
             red_len = v.numel()
+        if mode is None:
+            mode = self.mode
         want = self._r.outputs(out_count)
         if out is None:
             out = torch.empty(want, dtype=torch.bfloat16)
@@ -235,8 +250,8 @@ class Runtime:
     # EVERY `out` MUST STAY ALIVE UNTIL submit(), because that is when the card's
     # answer is written into it.  batch() keeps the references so a caller cannot
     # lose one to the garbage collector mid-program.
-    def batch(self, mode: int = ACC_SINGLE) -> "Batch":
-        return Batch(self, mode)
+    def batch(self, mode: int | None = None) -> "Batch":
+        return Batch(self, self.mode if mode is None else mode)
 
     def outputs(self, out_count: int) -> int:
         """How many BF16 a matvec over `out_count` supergroups writes — the padding
@@ -248,6 +263,19 @@ class Runtime:
 
     def stats_reset(self) -> None:
         self._r.stats_reset()
+
+    # ---- ISA trace ----------------------------------------------------------
+    def trace_open(self, path, header: str = "") -> None:
+        """Write every launched program to `path` from here on, after `header`.
+        The format is pim_rt_trace's; see include/pimrt/pim_op.h."""
+        self._r.trace_open(str(path), header)
+
+    def trace_close(self) -> None:
+        self._r.trace_close()
+
+    def trace_label(self, label: str) -> None:
+        """The label on the header of every launch until the next call."""
+        self._r.trace_label(label)
 
 
 def geometry() -> dict:
@@ -290,6 +318,34 @@ class Batch:
         with _range(f"pim::add[{out_count}g x {red_len}]"):
             self.rt._r.add(m._t, out_first, out_count, red_off, red_len,
                            vp, vn, yp, yn)
+        self._keep.append(out)          # alive until submit writes it
+        return out
+
+    def add_heads(self, m: Tensor, v: torch.Tensor, *, nhead: int, head_len: int,
+                  out: torch.Tensor, out_first: int = 0,
+                  out_count: int | None = None, red_off: int = 0) -> torch.Tensor:
+        """Several heads behind one vector load: Q.K^T with Q laid out like a row of K.
+
+        `v` is nhead segments of head_len; segment h pairs with m's reduction range
+        [red_off + h*head_len, red_off + (h+1)*head_len).  `out` is [nhead, at least
+        outputs(out_count)] and row h gets head h's outputs.  Its rows may be any
+        distance apart — a strided view of a bigger tensor — but each row must be
+        contiguous.  See pim_op_add_heads."""
+        if out_count is None:
+            out_count = m.ngroups - out_first
+        vp, vn = _ptr(v, "vector")
+        want = self.rt._r.outputs(out_count)
+        if out.dtype is not torch.bfloat16 or out.device.type != "cpu":
+            raise TypeError(f"output is {out.dtype} on {out.device}; it must be "
+                            f"bfloat16 on the CPU")
+        if (out.dim() != 2 or out.shape[0] != nhead or out.shape[1] < want
+                or out.stride(1) != 1):
+            raise ValueError(f"output must be [{nhead}, >= {want}] with contiguous "
+                             f"rows; got {tuple(out.shape)}, strides {out.stride()}")
+        span = (nhead - 1) * out.stride(0) + want
+        with _range(f"pim::add_heads[{out_count}g x {nhead}h]"):
+            self.rt._r.add_heads(m._t, out_first, out_count, red_off, nhead, head_len,
+                                 vp, vn, out.data_ptr(), span, out.stride(0))
         self._keep.append(out)          # alive until submit writes it
         return out
 

@@ -338,8 +338,56 @@ int main(void)
         free(Kh); free(q); free(one); free(bat);
     }
 
-    // ---- 5. what it refuses ------------------------------------------------
-    printf("\n  4. refusals\n");
+    // ---- 5. both accumulator latches -----------------------------------------
+    // A runtime opened with allow_t_latch runs PIM_ACC_DUAL: output groups go in
+    // pairs on ISR[35] and each pair shares its vector loads.  Both modes must
+    // match the golden exactly.  Five groups leave the last pair with one group,
+    // and three chunks make every output accumulate across three vector loads.
+    printf("\n  5. two accumulator latches\n");
+    {
+        uint32_t n = 160, k = 3072;
+        pim_rt_config cfg2 = { .max_red = 4096, .max_out_groups = 128,
+                               .max_batch = 8, .allow_t_latch = true };
+        pim_rt     *rt2 = NULL;
+        pim_tensor  W;
+        uint16_t   *Wh = malloc((size_t)n * k * 2);
+        uint16_t   *x  = malloc((size_t)k * 2);
+        uint16_t   *golden = malloc((size_t)n * 2);
+        uint16_t   *y1, *y2;
+        pim_rt_stat s0, s1, s2;
+
+        for (size_t i = 0; i < (size_t)n * k; i++) Wh[i] = rnd_bf16();
+        for (uint32_t i = 0; i < k; i++) x[i] = rnd_bf16();
+
+        CHECK(!(bad = pim_rt_open(c, &cfg2, &rt2)), "open with allow_t_latch: %s",
+              bad ? bad : "");
+        CHECK(!(bad = pim_tensor_alloc(c, PIM_LAYOUT_OUT_MAJOR, n, k, 0, &W)),
+              "alloc: %s", bad ? bad : "");
+        CHECK(!(bad = pim_tensor_upload(c, &W, Wh)), "upload: %s", bad ? bad : "");
+        y1 = malloc((size_t)pim_op_outputs(rt, W.ngroups) * 2);
+        y2 = malloc((size_t)pim_op_outputs(rt, W.ngroups) * 2);
+        if (rt2) {
+            pim_rt_stat_get(rt2, &s0);
+            CHECK(!(bad = pim_op_matvec(rt2, &W, 0, W.ngroups, 0, k, x, y1,
+                                        PIM_ACC_SINGLE)), "single: %s", bad ? bad : "");
+            pim_rt_stat_get(rt2, &s1);
+            CHECK(!(bad = pim_op_matvec(rt2, &W, 0, W.ngroups, 0, k, x, y2,
+                                        PIM_ACC_DUAL)), "dual: %s", bad ? bad : "");
+            pim_rt_stat_get(rt2, &s2);
+            pim_gemv_golden(Wh, n, k, x, golden);
+            compare("SINGLE W[160 x 3072] . x", y1, golden, n);
+            compare("DUAL   W[160 x 3072] . x", y2, golden, n);
+            printf("     vector loads %u -> %u, ISAs %u -> %u\n",
+                   s1.nwrvec - s0.nwrvec, s2.nwrvec - s1.nwrvec,
+                   s1.nisr - s0.nisr, s2.nisr - s1.nisr);
+            pim_rt_close(rt2);
+        }
+        pim_tensor_free(c, &W);
+        free(Wh); free(x); free(golden); free(y1); free(y2);
+    }
+
+    // ---- 6. what it refuses ------------------------------------------------
+    printf("\n  6. refusals\n");
     {
         pim_tensor W;
         uint16_t   v[64] = { 0 }, y[64];

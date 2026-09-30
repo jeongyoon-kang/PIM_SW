@@ -134,6 +134,148 @@ out:
 }
 
 // ------------------------------------------------------------------------------
+// Q.K^T with Q laid out like a row of K: one WRVEC for every head, then per output
+// group one MAC per head in row order.  Checked after lowering and verifying: the one
+// WRVEC's length, every MAC's row, column, length and latch, and the drain count.
+static void heads_case(pim_ctx *c, uint32_t width, uint32_t head_len, uint32_t ntok,
+                       pim_acc_mode mode, const char *what)
+{
+    const pim_geometry *g = pim_geom_ctx(c);
+    enum { CAP = 8192 };
+    static pim_isr  li[CAP], lo[CAP];
+    static pim_ref  lr[CAP];
+    static pim_atom la[CAP / 2];
+    uint32_t    nlatch = (mode == PIM_ACC_DUAL) ? 2u : 1u;
+    uint32_t    nhead = width / head_len, head_beats = head_len / 16;
+    uint32_t    out_count, step, nwrvec = 0, wrvec_len = 0, nmac = 0, nrd = 0;
+    uint32_t    badrow = 0, badcol = 0, badlen = 0, badt = 0;
+    uint64_t    vtag = 0x7465737476656374ull;
+    size_t      xbytes, ybytes;
+    void       *x = NULL, *y = NULL;
+    pim_logical lp;
+    pim_prog    prog;
+    pim_tensor  t;
+    const char *bad;
+
+    pim_tensor_plan_growable(g, PIM_LAYOUT_OUT_PACKED, width, &t);
+    step = g->nch * g->nbank * t.pack;
+    for (uint32_t n = step; n < ntok + step; n += step)
+        if ((bad = pim_tensor_grow(c, &t, n))) { CHECK(0, "%s: grow: %s", what, bad); goto out; }
+    out_count = pim_tensor_groups(&t, ntok);
+
+    xbytes = (size_t)width * 2;
+    ybytes = (size_t)out_count * nhead * g->nch * 32;
+    x = pim_alloc_ctx(c, xbytes, PIM_MEM_GPR);
+    y = pim_alloc_ctx(c, ybytes, PIM_MEM_GPR);
+    CHECK(x && y, "%s: GPR allocation", what);
+    if (!x || !y) goto out;
+    pim_tag_set_ctx(c, x, vtag);
+
+    pim_logical_init(&lp, li, CAP, lr, CAP, la, CAP / 2, g->nch, nlatch);
+    if ((bad = pim_matvec_heads_logical_part(g, &t, 0, out_count, 0, nhead, head_len,
+                                             x, xbytes, vtag, y, ybytes, mode, &lp)) ||
+        (bad = pim_matvec_eos(g, &lp))) {
+        CHECK(0, "%s: build: %s", what, bad); goto out;
+    }
+    CHECK(lp.nisr == pim_matvec_heads_nisr(out_count, nhead, mode),
+          "%s: %u logical ISRs, pim_matvec_heads_nisr says %u", what, lp.nisr,
+          pim_matvec_heads_nisr(out_count, nhead, mode));
+    pim_prog_init(&prog, lo, CAP);
+    if ((bad = pim_prog_lower_ctx(c, &lp, &prog,
+                                  mode == PIM_ACC_DUAL ? PIM_LOWER_ALLOW_T : 0))) {
+        CHECK(0, "%s: lower: %s", what, bad); goto out;
+    }
+    bad = pim_prog_verify(&prog, mode == PIM_ACC_DUAL ? PIM_VERIFY_ALLOW_T : 0);
+    CHECK(!bad, "%s: pim_prog_verify: %s", what, bad ? bad : "");
+
+    for (uint32_t i = 0; i < prog.n; i++) {
+        pim_isr_info in;
+        pim_isr_decode(&prog.w[i], &in);
+        if (in.opcode == PIM_OP_WRVEC) { nwrvec++; wrvec_len = in.opsize; }
+        if (in.opcode == PIM_OP_RD_MAC) nrd++;
+        if (in.opcode == PIM_OP_MAC) {
+            uint32_t grp = nmac / nhead, h = nmac % nhead;
+            pim_unit un;
+            nmac++;
+            if (pim_addr_unit_ctx(c, pim_tensor_unit_addr(g, &t, pim_tensor_unit(&t, grp, 0)),
+                                  g->unit_bytes, 0, &un) || in.row != un.row)
+                badrow++;
+            if (in.col != pim_tensor_row_off(&t, grp) / 16 + h * head_beats) badcol++;
+            if (in.opsize != head_beats) badlen++;
+            if (in.t != h % nlatch) badt++;
+        }
+    }
+    CHECK(nwrvec == 1 && wrvec_len == nhead * head_beats,
+          "%s: %u WRVEC(s) of %u beats, expected one of %u", what, nwrvec, wrvec_len,
+          nhead * head_beats);
+    CHECK(nmac == out_count * nhead, "%s: %u MAC(s), expected %u", what, nmac,
+          out_count * nhead);
+    CHECK(nrd == out_count * nhead * g->nch, "%s: %u RD_MAC(s), expected %u", what, nrd,
+          out_count * nhead * g->nch);
+    CHECK(!badrow && !badcol && !badlen && !badt,
+          "%s: of %u MACs, %u wrong row, %u wrong column, %u wrong length, %u wrong latch",
+          what, nmac, badrow, badcol, badlen, badt);
+    printf("  %-34s 1 WRVEC of %2u beats, %4u MAC(s) of %u beats, %4u RD_MAC(s): %s\n",
+           what, wrvec_len, nmac, head_beats, nrd,
+           (badrow || badcol || badlen || badt) ? "WRONG" : "ok");
+out:
+    if (x) pim_free_ctx(c, x);
+    if (y) pim_free_ctx(c, y);
+    pim_tensor_free(c, &t);
+}
+
+// ------------------------------------------------------------------------------
+// The GB read position (pim_prog_verify, rule 1): MACs may take one vector in
+// segments, but not across its end, and the vector must be read in whole passes
+// before the next WRVEC and before the program ends.
+static void check_gb_wrap(void)
+{
+    struct { const char *what; int accept; uint32_t n; struct { uint32_t op, len; } s[8]; }
+    cases[] = {
+        { "two MACs take one vector in halves", 1, 6,
+          { { ISR_OP_WRVEC, 8 }, { ISR_OP_MAC, 4 }, { ISR_OP_RD_MAC, 0 },
+            { ISR_OP_MAC, 4 }, { ISR_OP_RD_MAC, 0 }, { ISR_OP_EOS, 0 } } },
+        { "the program ends half-way through", 0, 4,
+          { { ISR_OP_WRVEC, 8 }, { ISR_OP_MAC, 4 }, { ISR_OP_RD_MAC, 0 },
+            { ISR_OP_EOS, 0 } } },
+        { "a WRVEC half-way through the last", 0, 7,
+          { { ISR_OP_WRVEC, 8 }, { ISR_OP_MAC, 4 }, { ISR_OP_RD_MAC, 0 },
+            { ISR_OP_WRVEC, 8 }, { ISR_OP_MAC, 8 }, { ISR_OP_RD_MAC, 0 },
+            { ISR_OP_EOS, 0 } } },
+        { "a MAC across the end of the vector", 0, 6,
+          { { ISR_OP_WRVEC, 8 }, { ISR_OP_MAC, 6 }, { ISR_OP_RD_MAC, 0 },
+            { ISR_OP_MAC, 6 }, { ISR_OP_RD_MAC, 0 }, { ISR_OP_EOS, 0 } } },
+    };
+
+    printf("\nthe GB read position (verify rule 1)\n");
+    for (unsigned k = 0; k < sizeof cases / sizeof *cases; k++) {
+        pim_isr  w[8];
+        pim_prog p;
+        uint32_t rdword = 0;
+        const char *bad;
+
+        pim_prog_init(&p, w, 8);
+        for (uint32_t i = 0; i < cases[k].n; i++) {
+            struct emu_isr_spec s = emu_isr_default_ch(cases[k].s[i].op, 1u);
+            struct emu_isr      e;
+            s.opsize = cases[k].s[i].len;
+            if (cases[k].s[i].op == ISR_OP_MAC) {
+                s.row = 100; s.pu_mask = 0xFFFF; s.gb_mc_mask = 0xFFFF;
+            } else if (cases[k].s[i].op == ISR_OP_RD_MAC) {
+                s.row = 1000 + rdword++;
+            }
+            emu_isr_build(&e, &s);
+            pim_prog_push(&p, (const pim_isr *)&e);
+        }
+        bad = pim_prog_verify(&p, 0);
+        CHECK(cases[k].accept ? !bad : bad != NULL, "%s: %s", cases[k].what,
+              bad ? bad : "accepted");
+        printf("  %-36s -> %s\n", cases[k].what, bad ? "refused" : "accepted");
+        if (bad) printf("     \"%.66s...\"\n", bad);
+    }
+}
+
+// ------------------------------------------------------------------------------
 // Build both ways and compare.  `mode` and the group range are the caller's, so the
 // hoisted-WRVEC path (nchunks == 1) and the chained one are both reachable.
 static void compare(pim_ctx *c, uint32_t n, uint32_t k, pim_acc_mode mode,
@@ -407,6 +549,13 @@ int main(void)
     grow_mac_case(c, PIM_LAYOUT_RED_MAJOR,  1024, 1500, 4, 0,   1500, "S.V, V 3B, one head");
     grow_mac_case(c, PIM_LAYOUT_OUT_PACKED, 512,  300,  0, 64,  64,   "q.K, K 1B, head 1");
     grow_mac_case(c, PIM_LAYOUT_OUT_PACKED, 1024, 200,  0, 896, 128,  "q.K, K 3B, head 7");
+
+    printf("\nQ laid out like a row of K: every head behind one WRVEC\n");
+    heads_case(c, 512,  64,  300, PIM_ACC_SINGLE, "K 1B (8x64, 2 tokens a row)");
+    heads_case(c, 512,  64,  300, PIM_ACC_DUAL,   "K 1B, two latches");
+    heads_case(c, 1024, 128, 200, PIM_ACC_SINGLE, "K 3B/Qwen (8x128)");
+    heads_case(c, 1024, 128, 200, PIM_ACC_DUAL,   "K 3B/Qwen, two latches");
+    check_gb_wrap();
 
     printf("\n%s\n", fail ? "FAILED" : "all checks passed");
     return fail ? 1 : 0;

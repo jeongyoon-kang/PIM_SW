@@ -87,7 +87,8 @@ typedef struct {
 	size_t res_bytes;
 
 	/* Evidence that this image decodes ISR[35], which PIM_ACC_DUAL needs.  Passed
-	 * to lowering as PIM_LOWER_ALLOW_T; without it a DUAL op is refused early
+	 * to lowering as PIM_LOWER_ALLOW_T and to the engine as
+	 * pim_exec_config.allow_t_latch; without it a DUAL op is refused early
 	 * rather than producing a silently wrong number at the doorbell. */
 	bool allow_t_latch;
 
@@ -116,6 +117,7 @@ pim_ctx    *pim_rt_ctx  (pim_rt *r);
  * what the IMEM transfer and the two MMIO writes cost. */
 typedef struct {
 	uint64_t launch_us;   /* doorbell -> done, summed over every launch */
+	uint64_t run_cyc;     /* the board's RUN_CYC, summed over every launch */
 	uint32_t polls;
 	uint32_t nlaunch;     /* doorbells; more than one when IMEM is the limit */
 	uint32_t nisr;
@@ -134,6 +136,19 @@ typedef struct {
 
 void pim_rt_stat_get  (const pim_rt *r, pim_rt_stat *out);
 void pim_rt_stat_reset(pim_rt *r);
+
+/* ISA TRACE.  While a stream is set, every launch writes the program it ran there:
+ * one header line
+ *
+ *     # launch <n>  <label>  part <k>  isrs <count>  run_cyc <cycles>  us <us>
+ *
+ * then the program as pim_prog_dump prints it.  <n> counts launches since the
+ * runtime opened.  <label> is the text last given to pim_rt_trace_label, and <k>
+ * counts the launches since then, because one op can take several launches.  A
+ * launch that fails is written with "failed <reason>" in place of the timing.
+ * NULL stops the trace; the caller owns the stream. */
+void pim_rt_trace      (pim_rt *r, FILE *out);
+void pim_rt_trace_label(pim_rt *r, const char *label);
 
 /* THE OP.
  *
@@ -187,6 +202,20 @@ const char *pim_op_add   (pim_rt *r, const pim_tensor *m,
                           uint32_t red_off, uint32_t red_len,
                           const uint16_t *v, uint16_t *y);
 const char *pim_op_submit(pim_rt *r);
+
+/* Several heads behind one vector load, stacked like pim_op_add — the schedule is
+ * pim_matvec_heads_logical_part.  Q.K^T with Q laid out like a row of K:
+ *
+ *   v          nhead * head_len BF16: segment h pairs with m's reduction range
+ *              [red_off + h*head_len, red_off + (h+1)*head_len)
+ *   y          nhead rows, row h at y + h * y_stride, each pim_op_outputs(out_count)
+ *              BF16 in the same order pim_op_add writes one
+ *
+ * One WRVEC per launch; an op too wide for one launch is split by output group. */
+const char *pim_op_add_heads(pim_rt *r, const pim_tensor *m,
+                             uint32_t out_first, uint32_t out_count,
+                             uint32_t red_off, uint32_t nhead, uint32_t head_len,
+                             const uint16_t *v, uint16_t *y, size_t y_stride);
 
 /* Outputs pim_op_matvec writes for a given out_count — the size `y` must have.
  * Worth a function because it is nch*nbank*out_count and getting it from the tensor

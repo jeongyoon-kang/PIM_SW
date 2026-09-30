@@ -303,3 +303,134 @@ const char *pim_matvec_logical_part(const pim_geometry *g, const pim_tensor *m,
 
     return NULL;
 }
+
+// ---- several heads behind one vector load -----------------------------------
+//
+//     WRVEC                         nhead * head_beats, the whole Q row
+//     for each output group:
+//         for each pass of nlatch heads:
+//             MAC x nlatch          COL = the head's place in the row, T = latch
+//             RD_MAC x nlatch
+//
+// The MACs take the vector's segments in order because the GB read position moves
+// on by each MAC's OPSIZE and wraps at the end of the vector.
+uint32_t pim_matvec_heads_nisr(uint32_t out_count, uint32_t nhead, pim_acc_mode mode)
+{
+    // One MAC and one logical drain per head per group, whichever latch they use.
+    (void)mode;
+    if (!out_count || !nhead) return 1;                /* EOS */
+    return 1 + out_count * nhead * 2 + 1;              /* WRVEC, MAC+drain, EOS */
+}
+
+const char *pim_matvec_heads_logical_part(const pim_geometry *g, const pim_tensor *m,
+                                          uint32_t out_first, uint32_t out_count,
+                                          uint32_t red_off, uint32_t nhead,
+                                          uint32_t head_len,
+                                          const void *vgpr, size_t vbytes,
+                                          uint64_t vtag,
+                                          const void *ygpr, size_t ybytes,
+                                          pim_acc_mode mode, pim_logical *out)
+{
+    uint32_t all_ch, nlatch, head_beats, ck, col0;
+    struct emu_isr_spec s;
+    struct emu_isr      isr;
+    const char *bad;
+
+    if (!g || !m || !vgpr || !ygpr || !out)
+        return "pim_matvec_heads_logical: null argument";
+    if (!out_count) return NULL;
+    if (!nhead || !head_len || head_len % ELEMS_PER_BEAT || red_off % ELEMS_PER_BEAT) {
+        snprintf(mv_err, sizeof mv_err,
+                 "pim_matvec_heads_logical: %u heads of %u from red_off %u; the heads "
+                 "and red_off must be whole beats of %u", nhead, head_len, red_off,
+                 ELEMS_PER_BEAT);
+        return mv_err;
+    }
+    if (red_off % ELEMS_PER_ROW + (uint64_t)nhead * head_len > ELEMS_PER_ROW) {
+        snprintf(mv_err, sizeof mv_err,
+                 "pim_matvec_heads_logical: %u heads of %u from red_off %u cross a "
+                 "DRAM row; one vector load holds %u elements of one row", nhead,
+                 head_len, red_off, ELEMS_PER_ROW);
+        return mv_err;
+    }
+    if ((uint64_t)red_off + (uint64_t)nhead * head_len > m->nredpad) {
+        snprintf(mv_err, sizeof mv_err,
+                 "pim_matvec_heads_logical: %u heads of %u from red_off %u run past "
+                 "the %u elements this tensor has on its reduction axis", nhead,
+                 head_len, red_off, m->nredpad);
+        return mv_err;
+    }
+    if (out_first + out_count > m->ngroups) {
+        snprintf(mv_err, sizeof mv_err,
+                 "pim_matvec_heads_logical: output groups [%u, %u) run past the %u "
+                 "this tensor has", out_first, out_first + out_count, m->ngroups);
+        return mv_err;
+    }
+    if (out_first % m->pack) {
+        snprintf(mv_err, sizeof mv_err,
+                 "pim_matvec_heads_logical: out_first %u is not a multiple of the %u "
+                 "MAC groups that share one bank row", out_first, m->pack);
+        return mv_err;
+    }
+
+    all_ch     = (1u << g->nch) - 1u;
+    nlatch     = (mode == PIM_ACC_DUAL) ? 2u : 1u;
+    head_beats = head_len / ELEMS_PER_BEAT;
+    ck         = red_off / ELEMS_PER_ROW;
+    col0       = (red_off % ELEMS_PER_ROW) / ELEMS_PER_BEAT;
+
+    s = emu_isr_default_ch(ISR_OP_WRVEC, all_ch);
+    s.opsize = nhead * head_beats;
+    s.row    = 0;                        /* blank; the reference below fills it */
+    if ((bad = emu_isr_build(&isr, &s))) return bad;
+    if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr, PIM_REF_GPR_WORD,
+                                    PIM_SPLIT_NONE, vgpr, vbytes, 0, vtag)))
+        return bad;
+
+    for (uint32_t k = 0; k < out_count; k++) {
+        uint32_t grp  = out_first + k;
+        uint32_t unit = pim_tensor_unit(m, grp, ck);
+        void    *ua   = pim_tensor_unit_addr(g, m, unit);
+        uint32_t col  = col0 + pim_tensor_row_off(m, grp) / ELEMS_PER_BEAT;
+
+        if (!ua) {
+            snprintf(mv_err, sizeof mv_err,
+                     "pim_matvec_heads_logical: unit %u (group %u, chunk %u) is past "
+                     "the %u this tensor holds", unit, grp, ck, pim_tensor_nunits(m));
+            return mv_err;
+        }
+        for (uint32_t h0 = 0; h0 < nhead; h0 += nlatch) {
+            uint32_t nh    = nhead - h0 < nlatch ? nhead - h0 : nlatch;
+            uint32_t first = out->nisr;       /* this pass owns its latches from here */
+
+            for (uint32_t t = 0; t < nh; t++) {
+                s = emu_isr_default_ch(ISR_OP_MAC, all_ch);
+                s.opsize     = head_beats;
+                s.row        = 0;
+                s.col        = col + (h0 + t) * head_beats;
+                s.pu_mask    = (1u << g->nbank) - 1u;
+                s.gb_mc_mask = s.pu_mask;
+                if ((bad = emu_isr_build(&isr, &s))) return bad;
+                if (t) emu_isr_set(&isr, ISR_F_T, 1u);
+                if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
+                                                PIM_REF_DRAM_UNIT, PIM_SPLIT_NONE,
+                                                ua, g->unit_bytes, 0, m->tag)))
+                    return bad;
+            }
+            for (uint32_t t = 0; t < nh; t++) {
+                s = emu_isr_default_ch(ISR_OP_RD_MAC, 1u);
+                s.opsize = 0;
+                s.row    = 0;
+                if ((bad = emu_isr_build(&isr, &s))) return bad;
+                if (t) emu_isr_set(&isr, ISR_F_T, 1u);
+                if ((bad = pim_logical_push_ref(out, (const pim_isr *)&isr,
+                                                PIM_REF_GPR_WORD, PIM_SPLIT_PER_CHANNEL,
+                                                ygpr, ybytes,
+                                                (k * nhead + h0 + t) * g->nch, 0)))
+                    return bad;
+            }
+            if ((bad = pim_logical_atom(out, first, out->nisr - 1))) return bad;
+        }
+    }
+    return NULL;
+}

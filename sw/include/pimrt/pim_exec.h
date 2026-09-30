@@ -214,15 +214,21 @@ typedef struct {
 
 void        pim_isr_decode(const pim_isr *w, pim_isr_info *out);
 const char *pim_isr_opname(uint32_t opcode);
+/* A column header, then one line per ISR: its index, opcode, the decoded fields
+ * above, and the raw 256-bit word in hex with bit 255 first. */
 void        pim_prog_dump (const pim_prog *p, FILE *out);
 
 /* THE RULES A SINGLE ISR CANNOT SHOW, and the hardware checks none of them — the
  * validity gate was pulled out of the fetch path for timing on 2026-07-29 and has
  * not come back, so breaking one of these produces a wrong NUMBER, not an error.
  *
- *   1. a MAC's OPSIZE must equal the OPSIZE of the WRVEC that filled the GB.  The
- *      per-bank skid below the GB has no flush port, so a mismatch leaves beats
- *      behind and the NEXT MAC starts its vector at the wrong element.
+ *   1. a MAC reads OPSIZE beats of the GB from its read position, which then moves
+ *      on and wraps at the end of what the last WRVEC wrote [measured on the
+ *      2026-09-29 image, hwdef/test/emu_chain --test gbwrap].  A MAC that reads the
+ *      whole vector therefore starts the next one at beat 0 again, and several
+ *      MACs can take one vector's segments in turn.  A MAC must not read across
+ *      the end, and the vector must be read in whole passes before the next WRVEC
+ *      and before the program ends.
  *   2. every MAC must be drained by a RD_MAC before the program ends, or the latch
  *      is inherited by whatever runs next.
  *   3. two RD_MACs must not land on the same GPR word.
@@ -241,6 +247,7 @@ typedef struct {
     uint32_t status_before, status_after;
     uint32_t polls;
     uint64_t us;
+    uint64_t run_cyc;    /* CFR RUN_CYC after done: PL cycles from the doorbell to done */
     bool     saw_done;
 } pim_launch;
 

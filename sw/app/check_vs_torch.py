@@ -49,9 +49,9 @@ def torch_logits(hf_id: str, prompt: str):
     return out.logits[0, -1].float(), ids
 
 
-def pim_logits(hf_id: str, prompt: str):
+def pim_logits(hf_id: str, prompt: str, dual_latch: bool = False):
     from pimllm.model import PimModel
-    m = PimModel(hf_id, verbose=False)
+    m = PimModel(hf_id, verbose=False, dual_latch=dual_latch)
     ids = m.tokenizer(prompt, return_tensors="pt")
     m.cache.reset()
     with torch.no_grad():
@@ -67,15 +67,19 @@ def main() -> int:
     ap.add_argument("--model", default="llama-3.2-1b")
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--topk", type=int, default=5)
+    ap.add_argument("--dual-latch", action="store_true",
+                    help="run the card side on both accumulator latches, as "
+                         "generate.py --dual-latch does")
     args = ap.parse_args()
 
     key = args.model.lower().split("/")[-1]
     hf_id = B.KNOWN[key].hf_id if key in B.KNOWN else args.model
 
-    print(f"one forward pass, {hf_id!r}\n  prompt: {args.prompt!r}")
+    print(f"one forward pass, {hf_id!r}\n  prompt: {args.prompt!r}\n"
+          f"  latches: {2 if args.dual_latch else 1} per bank")
     ref, ids = torch_logits(hf_id, args.prompt)
     print(f"  {ids['input_ids'].shape[-1]} tokens in, {ref.numel()} logits out")
-    got, st = pim_logits(hf_id, args.prompt)
+    got, st = pim_logits(hf_id, args.prompt, args.dual_latch)
 
     scale = ref.abs().max()
     err = (got - ref).abs().max() / scale
@@ -94,7 +98,7 @@ def main() -> int:
         print(f"    {i}  torch {tok.decode([a])!r:>14} {ref[a]:8.3f}   "
               f"pim {tok.decode([b])!r:>14} {got[b]:8.3f} {mark}")
 
-    print(f"\n  {st['nop']} ops, {st['nisr']} ISAs, "
+    print(f"\n  {st['nop']} ops, {st['nisr']} ISAs, {st['nwrvec']} vector loads, "
           f"{st['launch_us'] / 1e6:.2f} s on the doorbell")
 
     # A correlation below this is not precision, it is a different computation.

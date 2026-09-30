@@ -130,6 +130,35 @@ const char *pim_matvec_logical_part(const pim_geometry *g, const pim_tensor *m,
                                     const void *ygpr, size_t ybytes,
                                     pim_acc_mode mode, pim_logical *out);
 
+/* SEVERAL HEADS BEHIND ONE VECTOR LOAD — Q.K^T with Q laid out like a row of K.
+ *
+ * The vector is `nhead` segments of `head_len` elements, in the order a row of `m`
+ * holds them from red_off: segment h pairs with m's reduction range
+ * [red_off + h*head_len, red_off + (h+1)*head_len).  One WRVEC loads all of them.
+ * Then, for every output group, one MAC per segment in segment order: the GB read
+ * position moves on by each MAC's OPSIZE and wraps at the end of the vector (see
+ * pim_prog_verify, rule 1), so MAC h reads segment h, and the next group starts at
+ * segment 0 again.
+ *
+ * For attention with GQA, the vector is one query head per KV head in KV-head
+ * order, nhead = H_kv and head_len = D, and one call does H_kv query heads.
+ *
+ * With PIM_ACC_DUAL the segments go in pairs, one per latch.  The whole vector must
+ * sit in one DRAM row's worth of the reduction axis (red_off % 1024 + nhead*head_len
+ * <= 1024, which is also the GB's 64 beats), and red_off and head_len are whole
+ * beats.  Segment h of group grp, channel ch, lands in GPR word
+ * (grp * nhead + h) * nch + ch of ygpr, grp counted from out_first. */
+uint32_t    pim_matvec_heads_nisr(uint32_t out_count, uint32_t nhead,
+                                  pim_acc_mode mode);
+const char *pim_matvec_heads_logical_part(const pim_geometry *g, const pim_tensor *m,
+                                          uint32_t out_first, uint32_t out_count,
+                                          uint32_t red_off, uint32_t nhead,
+                                          uint32_t head_len,
+                                          const void *vgpr, size_t vbytes,
+                                          uint64_t vtag,
+                                          const void *ygpr, size_t ybytes,
+                                          pim_acc_mode mode, pim_logical *out);
+
 #ifdef __cplusplus
 }
 #endif

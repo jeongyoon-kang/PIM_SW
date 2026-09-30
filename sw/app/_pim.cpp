@@ -22,7 +22,10 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -146,7 +149,33 @@ struct Runtime {
         cfg.res_bytes = res_bytes;
         ck(pim_rt_open(ctx(), &cfg, &rt));
     }
-    ~Runtime() { if (rt) pim_rt_close(rt); }
+    ~Runtime() { trace_close(); if (rt) pim_rt_close(rt); }
+
+    // ISA trace.  The file is opened here and handed to the runtime, which writes
+    // every launched program into it; `header` goes at the top of the file first.
+    FILE *trace_fp = nullptr;
+
+    void trace_open(const std::string &path, const std::string &header)
+    {
+        trace_close();
+        trace_fp = fopen(path.c_str(), "w");
+        if (!trace_fp)
+            throw std::runtime_error("trace: cannot open " + path + ": "
+                                     + strerror(errno));
+        setvbuf(trace_fp, nullptr, _IOFBF, 1 << 20);
+        fputs(header.c_str(), trace_fp);
+        pim_rt_trace(rt, trace_fp);
+    }
+
+    void trace_close()
+    {
+        if (!trace_fp) return;
+        pim_rt_trace(rt, nullptr);
+        fclose(trace_fp);
+        trace_fp = nullptr;
+    }
+
+    void trace_label(const std::string &label) { pim_rt_trace_label(rt, label.c_str()); }
 
     // y must have room for out_count * nch * nbank BF16 — INCLUDING the padding
     // outputs of the last supergroup, which are written and then ignored by the
@@ -195,6 +224,31 @@ struct Runtime {
                       (const uint16_t *)v, (uint16_t *)y));
     }
 
+    // Several heads behind one vector load.  y holds nhead rows y_stride apart, and
+    // yn counts the elements from y to the end of the last row.
+    void add_heads(Tensor &m, uint32_t out_first, uint32_t out_count,
+                   uint32_t red_off, uint32_t nhead, uint32_t head_len,
+                   uintptr_t v, size_t vn, uintptr_t y, size_t yn, size_t y_stride)
+    {
+        m.check();
+        if (vn != (size_t)nhead * head_len)
+            throw std::runtime_error("add_heads: vector has " + std::to_string(vn)
+                                     + " elements; " + std::to_string(nhead)
+                                     + " heads of " + std::to_string(head_len)
+                                     + " are " + std::to_string((size_t)nhead * head_len));
+        size_t want = pim_op_outputs(rt, out_count);
+        size_t need = nhead ? (size_t)(nhead - 1) * y_stride + want : 0;
+        if (yn < need)
+            throw std::runtime_error("add_heads: output holds " + std::to_string(yn)
+                                     + " elements but " + std::to_string(nhead)
+                                     + " rows of " + std::to_string(want) + ", "
+                                     + std::to_string(y_stride) + " apart, need "
+                                     + std::to_string(need));
+        py::gil_scoped_release nogil;
+        ck(pim_op_add_heads(rt, &m.t, out_first, out_count, red_off, nhead, head_len,
+                            (const uint16_t *)v, (uint16_t *)y, y_stride));
+    }
+
     void submit()
     {
         py::gil_scoped_release nogil;
@@ -207,6 +261,7 @@ struct Runtime {
         pim_rt_stat_get(rt, &s);
         py::dict d;
         d["launch_us"] = s.launch_us;
+        d["run_cyc"] = s.run_cyc;
         d["polls"] = s.polls;
         d["nlaunch"] = s.nlaunch;
         d["nisr"] = s.nisr;
@@ -298,6 +353,11 @@ PYBIND11_MODULE(_pim, m)
              py::arg("m"), py::arg("out_first"), py::arg("out_count"),
              py::arg("red_off"), py::arg("red_len"),
              py::arg("v"), py::arg("vn"), py::arg("y"), py::arg("yn"))
+        .def("add_heads", &Runtime::add_heads,
+             py::arg("m"), py::arg("out_first"), py::arg("out_count"),
+             py::arg("red_off"), py::arg("nhead"), py::arg("head_len"),
+             py::arg("v"), py::arg("vn"), py::arg("y"), py::arg("yn"),
+             py::arg("y_stride"))
         .def("submit", &Runtime::submit)
         .def("matvec", &Runtime::matvec,
              py::arg("m"), py::arg("out_first"), py::arg("out_count"),
@@ -306,6 +366,9 @@ PYBIND11_MODULE(_pim, m)
              py::arg("mode") = (int)PIM_ACC_SINGLE)
         .def("stats", &Runtime::stats)
         .def("stats_reset", &Runtime::stats_reset)
+        .def("trace_open", &Runtime::trace_open, py::arg("path"), py::arg("header") = "")
+        .def("trace_close", &Runtime::trace_close)
+        .def("trace_label", &Runtime::trace_label, py::arg("label"))
         .def("outputs", [](const Runtime &r, uint32_t n) {
             return pim_op_outputs(r.rt, n);
         }, py::arg("out_count"));

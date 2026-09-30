@@ -15,11 +15,12 @@ The softmax in the middle is what forces a GPR round trip per head per layer, an
 rearrangement removes it — it is not a staging decision, it is the one operation in
 attention this hardware cannot do.
 
-WHY red_off MATTERS HERE.  Eight KV heads of 128 share one 1024-element DRAM row and
-`red_off = kv_head * D` picks which.  Without it the K cache would be 1024/D times
-bigger than the data in it.  It is also the thing that would be wrong silently: a
-mis-scaled offset reads a neighbouring head's keys and returns a plausible vector of
-scores.
+WHY THE HEADS SHARE A ROW.  Eight KV heads of 128 share one 1024-element DRAM row,
+and each MAC's column picks one.  Without that the K cache would be 1024/D times
+bigger than the data in it.  Q is loaded in the same layout, one query head per KV
+head, so one vector load serves a MAC per head.  It is also the thing that would be
+wrong silently: a mis-scaled column reads a neighbouring head's keys and returns a
+plausible vector of scores.
 
 GQA IS FREE.  `repeat_kv` materialises H_q/H_kv copies of K and V; we never call it.
 Several query heads simply name the same `red_off`.
@@ -81,13 +82,33 @@ def pim_attention_forward(module, query: torch.Tensor, key, value,
     # ONE BATCH FOR THE WHOLE LAYER.  The launches split where IMEM says so and
     # nowhere else; whether that is one doorbell or forty is the runtime's business
     # and not this function's, which is the whole point of writing it this way.
+    #
+    # Q GOES IN LAID OUT LIKE A ROW OF K.  A row of K holds the KV heads side by
+    # side, so one vector load carries one query head per KV head in that order and
+    # the MACs take them in turn (pim_op_add_heads).  Query heads g, g+group, ... go
+    # with KV heads 0, 1, ..., so with GQA a position takes `group` vector loads.
     raw = torch.empty(s_q * h_q, wide, dtype=query.dtype)
+    h_kv = layer.n_kv_heads
+    if rt.row_elems % d:
+        raise NotImplementedError(
+            f"head_dim {d} does not divide a {rt.row_elems}-element DRAM row, so a KV "
+            f"head of K would straddle two rows")
+    per_load = rt.row_elems // d                 # KV heads one vector load can carry
+    tr = rt.tracer
+    if tr is not None:
+        tr.label("attn_qk", layer.layer_idx, first_q, n_kv - 1)
     with profile.span("attn q.K"), rt.batch() as bat:
         for i in range(s_q):
-            for h in range(h_q):
-                bat.add(layer.k, query[0, h, i].contiguous(), out_count=ngroup,
-                        red_off=(h // group) * d, red_len=d,
-                        out=raw[i * h_q + h])
+            base = i * h_q
+            for g in range(group):
+                for kv0 in range(0, h_kv, per_load):
+                    nh = min(per_load, h_kv - kv0)
+                    heads = slice(kv0 * group + g, (kv0 + nh) * group, group)
+                    bat.add_heads(layer.k,
+                                  query[0, heads, i].reshape(-1).contiguous(),
+                                  nhead=nh, head_len=d, red_off=kv0 * d,
+                                  out_count=ngroup,
+                                  out=raw[base + heads.start:base + heads.stop:group])
 
     # ---- 2. mask and softmax, on the host, ALL OF IT AT ONCE ---------------
     #
@@ -110,6 +131,8 @@ def pim_attention_forward(module, query: torch.Tensor, key, value,
     # ONLY THIS HEAD'S OUTPUTS.  V's output axis is H_kv*D wide; asking for all of
     # it would do H_kv times the work and discard all but one head's slice.
     got = torch.empty(s_q * h_q, rt.outputs(d // per), dtype=query.dtype)
+    if tr is not None:
+        tr.label("attn_sv", layer.layer_idx, first_q, n_kv - 1)
     with profile.span("attn s.V"), rt.batch() as bat:
         for i in range(s_q):
             for h in range(h_q):

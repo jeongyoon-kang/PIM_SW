@@ -97,11 +97,19 @@ struct pim_rt {
         uint32_t  out_count;
         pim_tensor m;          /* its layout, to put each result in place   */
         uint32_t  yword;       /* words into ygpr this piece's results land  */
+        uint32_t  nhead;       /* result rows: 1, or the heads of add_heads  */
+        size_t    y_stride;    /* elements from one of those rows to the next */
     } *piece;
     uint32_t  npiece;
 
     pim_rt_stat stat;
     char      err[320];
+
+    /* ---- ISA trace: where each launched program is written, and its header --- */
+    FILE     *trace;
+    char      trace_label[192];
+    uint64_t  trace_seq;       /* launches since open, traced or not           */
+    uint32_t  trace_part;      /* launches since the label was last set        */
 };
 
 static const char *fail(pim_rt *r, const char *fmt, ...)
@@ -157,7 +165,7 @@ const char *pim_rt_open(pim_ctx *c, const pim_rt_config *cfg, pim_rt **out)
     r->max_batch = cfg->max_batch ? cfg->max_batch : 1u;
 
     {
-        pim_exec_config ec = { 0 };
+        pim_exec_config ec = { .allow_t_latch = cfg->allow_t_latch };
         const char *bad = pim_exec_open(c, &ec, &r->exec);
         if (bad) { free(r); snprintf(open_err, sizeof open_err, "%s", bad); return open_err; }
     }
@@ -261,6 +269,30 @@ void pim_rt_stat_get(const pim_rt *r, pim_rt_stat *out)
 void pim_rt_stat_reset(pim_rt *r)
 { if (r) memset(&r->stat, 0, sizeof r->stat); }
 
+void pim_rt_trace(pim_rt *r, FILE *out)
+{ if (r) r->trace = out; }
+
+void pim_rt_trace_label(pim_rt *r, const char *label)
+{
+    if (!r) return;
+    snprintf(r->trace_label, sizeof r->trace_label, "%s", label ? label : "");
+    r->trace_part = 0;
+}
+
+// One launch into the trace: the header line, then the program.
+static void trace_launch(pim_rt *r, const pim_prog *p, const pim_launch *info,
+                         const char *failed)
+{
+    fprintf(r->trace, "# launch %llu  %s  part %u  isrs %u  ",
+            (unsigned long long)r->trace_seq, r->trace_label, r->trace_part, p->n);
+    if (failed)
+        fprintf(r->trace, "failed %s\n", failed);
+    else
+        fprintf(r->trace, "run_cyc %llu  us %llu\n",
+                (unsigned long long)info->run_cyc, (unsigned long long)info->us);
+    pim_prog_dump(p, r->trace);
+}
+
 uint32_t pim_op_outputs(const pim_rt *r, uint32_t out_count)
 { return r ? out_count * r->g->nch * r->g->nbank : 0; }
 
@@ -337,10 +369,15 @@ const char *pim_op_submit(pim_rt *r)
                                   r->cfg.allow_t_latch ? PIM_LOWER_ALLOW_T : 0)))
         return bad;
     t = mark(&r->stat.low_us, t);
-    if ((bad = pim_exec_run(r->exec, &prog, &info))) return bad;
+    bad = pim_exec_run(r->exec, &prog, &info);
+    r->trace_seq++;
+    r->trace_part++;
+    if (r->trace) trace_launch(r, &prog, &info, bad);
+    if (bad) return bad;
     t = mark(&r->stat.run_us, t);
 
     r->stat.launch_us += info.us;
+    r->stat.run_cyc   += info.run_cyc;
     r->stat.polls     += info.polls;
     r->stat.nisr      += prog.n;
     r->stat.nlaunch   += 1;
@@ -357,18 +394,21 @@ const char *pim_op_submit(pim_rt *r)
     for (uint32_t k = 0; k < r->npiece; k++) {
         const struct pim_piece *pc = &r->piece[k];
         uint32_t nout = pc->out_count * g->nch * g->nbank;
-        // Word (group, channel), lane b goes to the output pim_tensor_output names.
-        // The piece starts on a whole row, so its groups number from 0 here.  When
-        // the last row is only partly asked for, the lanes that land past the
-        // caller's buffer belong to outputs it did not ask for and are dropped.
+        // Word (group, head, channel), lane b goes to that head's row, at the output
+        // pim_tensor_output names.  The piece starts on a whole row, so its groups
+        // number from 0 here.  When the last row is only partly asked for, the lanes
+        // that land past the caller's buffer belong to outputs it did not ask for
+        // and are dropped.
         for (uint32_t sg = 0; sg < pc->out_count; sg++)
-            for (uint32_t ch = 0; ch < g->nch; ch++)
-                for (uint32_t b = 0; b < g->nbank; b++) {
-                    uint32_t o = pim_tensor_output(&pc->m, sg, ch, b);
-                    if (o < nout)
-                        pc->y[o] = r->ybuf[(pc->yword + sg * g->nch + ch)
-                                           * ELEMS_PER_BEAT + b];
-                }
+            for (uint32_t h = 0; h < pc->nhead; h++)
+                for (uint32_t ch = 0; ch < g->nch; ch++)
+                    for (uint32_t b = 0; b < g->nbank; b++) {
+                        uint32_t o = pim_tensor_output(&pc->m, sg, ch, b);
+                        if (o < nout)
+                            pc->y[h * pc->y_stride + o] =
+                                r->ybuf[(pc->yword + (sg * pc->nhead + h) * g->nch
+                                         + ch) * ELEMS_PER_BEAT + b];
+                    }
     }
     mark(&r->stat.unpack_us, t);
     r->npiece = 0;
@@ -464,11 +504,119 @@ static const char *add_one(pim_rt *r, const pim_tensor *m,
         r->piece[r->npiece].out_count = out_count;
         r->piece[r->npiece].m         = *m;
         r->piece[r->npiece].yword     = r->yword_used;
+        r->piece[r->npiece].nhead     = 1;
+        r->piece[r->npiece].y_stride  = 0;
         r->npiece++;
         r->vword_used += vwords;
         r->yword_used += ywords;
     }
     r->stat.nwrvec += pim_matvec_nwrvec(m, out_count, red_off, red_len, r->bmode);
+    return NULL;
+}
+
+// One several-heads piece that is KNOWN to fit behind a single doorbell; the same
+// shape as add_one.  The vector is whole beats, so it goes to the GPR as it is.
+static const char *add_heads_one(pim_rt *r, const pim_tensor *m,
+                                 uint32_t out_first, uint32_t out_count,
+                                 uint32_t red_off, uint32_t nhead, uint32_t head_len,
+                                 const uint16_t *v, uint16_t *y, size_t y_stride)
+{
+    const pim_geometry *g = r->g;
+    uint32_t vlen   = nhead * head_len;
+    uint32_t vwords = vlen / ELEMS_PER_BEAT;
+    uint32_t ywords = out_count * nhead * g->nch;
+    uint32_t want_isr = pim_matvec_heads_nisr(out_count, nhead, r->bmode);
+    const char *bad;
+
+    if ((size_t)vwords * EMU_WORD_BYTES > r->vbytes ||
+        (size_t)ywords * EMU_WORD_BYTES > r->ybytes)
+        return fail(r, "%u heads over %u output groups need %u vector and %u result "
+                       "GPR words, past the %zu and %zu B this rt reserved", nhead,
+                    out_count, vwords, ywords, r->vbytes, r->ybytes);
+    if (r->npiece &&
+        (r->npiece >= r->max_batch ||
+         (size_t)(r->vword_used + vwords) * EMU_WORD_BYTES > r->vbytes ||
+         (size_t)(r->yword_used + ywords) * EMU_WORD_BYTES > r->ybytes ||
+         r->lp.nisr + want_isr + 1u > r->lisr_cap ||
+         pim_lower_isr_count(&r->lp) + want_isr + out_count * nhead * (g->nch - 1u) + 1u
+             > pim_exec_max_isrs(r->exec))) {
+        pim_acc_mode mode = r->bmode;
+        if ((bad = pim_op_submit(r))) return bad;
+        if ((bad = pim_op_begin(r, mode))) return bad;
+    }
+
+    {
+        char *vp = (char *)r->vgpr + (size_t)r->vword_used * EMU_WORD_BYTES;
+        char *yp = (char *)r->ygpr + (size_t)r->yword_used * EMU_WORD_BYTES;
+        uint64_t t = now_us();
+
+        if ((bad = pim_memcpy_ctx(r->ctx, vp, v, (size_t)vlen * 2, PIM_TO_DEV, 0)))
+            return bad;
+        if ((bad = pim_tag_set_ctx(r->ctx, vp, vtag(vwords)))) return bad;
+        t = mark(&r->stat.vup_us, t);
+
+        if ((bad = pim_matvec_heads_logical_part(g, m, out_first, out_count, red_off,
+                                                 nhead, head_len,
+                                                 vp, (size_t)vlen * 2, vtag(vwords),
+                                                 yp, (size_t)ywords * EMU_WORD_BYTES,
+                                                 r->bmode, &r->lp)))
+            return bad;
+        mark(&r->stat.gen_us, t);
+
+        r->piece[r->npiece].y         = y;
+        r->piece[r->npiece].out_count = out_count;
+        r->piece[r->npiece].m         = *m;
+        r->piece[r->npiece].yword     = r->yword_used;
+        r->piece[r->npiece].nhead     = nhead;
+        r->piece[r->npiece].y_stride  = y_stride;
+        r->npiece++;
+        r->vword_used += vwords;
+        r->yword_used += ywords;
+    }
+    r->stat.nwrvec += 1;
+    return NULL;
+}
+
+const char *pim_op_add_heads(pim_rt *r, const pim_tensor *m,
+                             uint32_t out_first, uint32_t out_count,
+                             uint32_t red_off, uint32_t nhead, uint32_t head_len,
+                             const uint16_t *v, uint16_t *y, size_t y_stride)
+{
+    const pim_geometry *g;
+    uint32_t per_group, cap, gpl;
+    const char *bad;
+
+    if (!r || !m || !v || !y) return "pim_op_add_heads: null argument";
+    if (!r->batching) return fail(r, "pim_op_add_heads: call pim_op_begin first");
+    if (!out_count) return NULL;
+    g = r->g;
+    if (!nhead || !head_len || head_len % ELEMS_PER_BEAT || red_off % ELEMS_PER_BEAT)
+        return fail(r, "pim_op_add_heads: %u heads of %u from red_off %u; the heads "
+                       "and red_off must be whole beats of %u", nhead, head_len,
+                    red_off, ELEMS_PER_BEAT);
+    if (nhead > 1 && y_stride < pim_op_outputs(r, out_count))
+        return fail(r, "pim_op_add_heads: rows %zu apart hold fewer than the %u "
+                       "outputs a head writes", y_stride, pim_op_outputs(r, out_count));
+    if (out_first % m->pack)
+        return fail(r, "pim_op_add_heads: out_first %u is not a multiple of %u, the "
+                       "MAC groups that share one bank row", out_first, m->pack);
+
+    // Split by output group.  Every group's MACs read the vector the piece's WRVEC
+    // loaded, so each launch gets its own WRVEC and whole groups.
+    per_group = nhead * (1u + g->nch);          /* a MAC and nch drains per head */
+    cap = pim_exec_max_isrs(r->exec);
+    gpl = cap > 2u ? (cap - 2u) / per_group : 0u;          /* the WRVEC and EOS */
+    if (gpl < out_count) gpl -= gpl % m->pack;
+    if (!gpl)
+        return fail(r, "not even one bank row of %u MAC group(s) with %u heads fits "
+                       "in %u ISRs", m->pack, nhead, cap);
+
+    for (uint32_t g0 = 0; g0 < out_count; g0 += gpl) {
+        uint32_t ng = out_count - g0 < gpl ? out_count - g0 : gpl;
+        if ((bad = add_heads_one(r, m, out_first + g0, ng, red_off, nhead, head_len,
+                                 v, y + (size_t)g0 * g->nch * g->nbank, y_stride)))
+            return bad;
+    }
     return NULL;
 }
 

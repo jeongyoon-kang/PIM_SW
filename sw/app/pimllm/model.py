@@ -34,6 +34,7 @@ from . import attention, ops, profile
 from .budget import ModelShape, plan
 from .cache import PimCache, PimOutOfMemory
 from .device import Geometry
+from .isa_trace import IsaTrace
 
 
 class TimedStreamer(TextStreamer):
@@ -97,6 +98,12 @@ class PimLinear(nn.Module):
         # same program; keeping them apart would be 113 rows saying one thing each.
         # lm_head and down_proj are different shapes and DO need their own rows.
         self._span = "linear " + (name.rsplit(".", 1)[-1] or "?")
+        # For the ISA trace: "model.layers.3.self_attn.q_proj" is layer 3, node
+        # q_proj; "lm_head" is node lm_head with no layer.
+        parts = name.split(".")
+        self.node = parts[-1] or "?"
+        self.layer = next((int(parts[i + 1]) for i in range(len(parts) - 1)
+                           if parts[i] == "layers" and parts[i + 1].isdigit()), None)
         self.out_features, self.in_features = weight.shape
         self.w = ops.Tensor.from_weight(weight.contiguous())
         # A bias is [out_features] and elementwise; there is no MAC for it and no
@@ -109,9 +116,15 @@ class PimLinear(nn.Module):
         # loop and not a wider operation.
         shape = x.shape[:-1]
         flat = x.reshape(-1, self.in_features)
-        out = torch.empty(flat.shape[0], self.out_features, dtype=x.dtype)
+        n = flat.shape[0]
+        out = torch.empty(n, self.out_features, dtype=x.dtype)
+        tr = self.rt.tracer
         with profile.span(self._span):
-            for i in range(flat.shape[0]):
+            for i in range(n):
+                if tr is not None:
+                    # The rows are the step's LAST n positions: lm_head sees only
+                    # the final one, the layers see all of them.
+                    tr.label(self.node, self.layer, tr.pos_last - (n - 1) + i)
                 y = self.rt.matvec(self.w, flat[i].contiguous())
                 out[i] = y[:self.out_features]
         if self.bias is not None:
@@ -156,10 +169,13 @@ class PimModel:
     """
 
     def __init__(self, hf_id: str, geometry: Geometry | None = None,
-                 verbose: bool = True):
+                 verbose: bool = True, dual_latch: bool = False,
+                 isa_trace: str | None = None):
+        """`isa_trace` is a directory; when given, every ISA program the card runs
+        is written there — see pimllm/isa_trace.py."""
         from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-        self.hf_id, self.verbose = hf_id, verbose
+        self.hf_id, self.verbose, self.dual_latch = hf_id, verbose, dual_latch
         cfg = AutoConfig.from_pretrained(hf_id)
         self.shape = ModelShape.from_hf_config(cfg, hf_id)
 
@@ -197,9 +213,13 @@ class PimModel:
         # WHY THE BUDGETS ARE EXPLICIT.  Derived from max_red they would reserve
         # the FFN's 16 KiB for each piece, and an attention query is 128 B — 4 MiB
         # of GPR would hold 256 pieces instead of thousands.
+        #
+        # dual_latch runs every linear and both attention matmuls on the two
+        # accumulator latches; see ops.Runtime.
         self.rt = ops.Runtime(
             max_red=max(self.shape.hidden, self.shape.intermediate),
             max_out_groups=(self.shape.vocab + per - 1) // per,
+            dual_latch=dual_latch,
             max_batch=4096,
             vec_bytes=1 << 20,
             res_bytes=5 << 19,          # 2.5 MiB; GPR is 4 MiB in total
@@ -221,6 +241,20 @@ class PimModel:
             print(f"  {n} linear layers, {total / 2**30:.2f} GiB on the card")
 
         self.cache = PimCache(self.rt, self.shape.layers)
+
+        # A new trace file at the start of every forward pass.
+        self.isa_trace = None
+        if isa_trace:
+            self.isa_trace = IsaTrace(self.rt, isa_trace)
+            self.model.register_forward_pre_hook(self._begin_trace_step,
+                                                 with_kwargs=True)
+
+    def _begin_trace_step(self, module, args, kwargs):
+        x = kwargs.get("input_ids")
+        if x is None:
+            x = args[0] if args else kwargs.get("inputs_embeds")
+        first = self.cache.get_seq_length()
+        self.isa_trace.begin_step(first, first + x.shape[1] - 1)
 
     # ------------------------------------------------------------------------
     def generate(self, prompt: str, max_new_tokens: int = 32, stream: bool = True,
@@ -265,9 +299,14 @@ class PimModel:
         except PimOutOfMemory as e:
             print(f"\n  STOPPED: {e}", flush=True)
             return "".join(streamer.text) if streamer else ""
+        finally:
+            if self.isa_trace is not None:
+                self.isa_trace.end_step()
         return self.tokenizer.decode(out[0], skip_special_tokens=True)
 
     def free(self) -> None:
+        if self.isa_trace is not None:
+            self.isa_trace.close()
         self.cache.free()
         for m in self.model.modules():
             if isinstance(m, PimLinear):

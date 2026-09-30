@@ -119,6 +119,16 @@ def main() -> int:
     ap.add_argument("--backend", choices=("pim", "torch"), default="pim",
                     help="pim runs the linears and both attention matmuls on the "
                          "card; torch is the reference")
+    ap.add_argument("--dual-latch", action="store_true",
+                    help="use both accumulator latches of each bank (ISR[35]).  "
+                         "Output groups run in pairs, one per latch, and a pair "
+                         "shares its vector loads.  The image must decode ISR[35]; "
+                         "sw/runtime/test/tlatch_test checks that")
+    ap.add_argument("--isa-trace", metavar="DIR",
+                    help="write every ISA program the card runs under DIR: one file "
+                         "per forward step, each launch headed by its step, token "
+                         "position, layer, node and RUN_CYC.  Format in "
+                         "pimllm/isa_trace.py")
     args = ap.parse_args()
 
     # ---- 1. the geometry ---------------------------------------------------
@@ -170,7 +180,10 @@ def main() -> int:
               "card.\n           RMSNorm, RoPE, SiLU, softmax and the embedding "
               "lookup stay on the host;\n           see pimllm/model.py for why "
               "each one does.")
-        m = PimModel(hf_id, geometry=g, verbose=True)
+        print("  LATCHES: " + ("2 per bank (--dual-latch): output groups run in pairs"
+                               if args.dual_latch else "1 per bank"))
+        m = PimModel(hf_id, geometry=g, verbose=True, dual_latch=args.dual_latch,
+                     isa_trace=args.isa_trace)
         # The streamer prints each token as it lands, then the joined text and the
         # rate; a second print here would only repeat it.
         print(f"\n  prompt: {args.prompt!r}")
@@ -187,8 +200,10 @@ def main() -> int:
                        chat=args.chat)
             st = m.rt.stats()
             print(f"  {st['nop']} ops, {st['nlaunch']} launches, {st['nisr']} ISAs, "
-                  f"{st['nwrvec']} vector loads, {st['launch_us'] / 1e6:.2f} s on "
-                  f"the doorbell")
+                  f"{st['nwrvec']} vector loads, {st['run_cyc']:,} RUN_CYC, "
+                  f"{st['launch_us'] / 1e6:.2f} s on the doorbell")
+        if m.isa_trace is not None:
+            print(f"  ISA trace: {m.isa_trace.step + 1} steps in {args.isa_trace}")
         m.free()
         return 0
 

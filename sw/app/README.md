@@ -3,6 +3,8 @@
 ```bash
 ./generate.py --dry-run --model llama-3.2-3b     # placement only; no board, no download
 ./generate.py --model llama-3.2-1b --prompt "..."  # ...and generate
+./generate.py --model llama-3.2-1b --dual-latch    # ...on both accumulator latches
+./generate.py --model llama-3.2-1b --isa-trace DIR # ...writing every ISA program to DIR
 ```
 
 ## Build
@@ -62,6 +64,34 @@ hardware cannot do.
 **GQA is free.** `repeat_kv` materialises H_q/H_kv copies of K and V; the PIM
 attention function never calls it. Several query heads simply name the same
 `red_off`.
+
+## One accumulator latch or two
+
+Each bank has two accumulator latches, chosen per instruction by ISR[35] (`T`). By
+default every matvec uses latch 0, so when its reduction spans more than one
+1024-element chunk it loads the vector again for each output group.
+
+`--dual-latch` (`PimModel(dual_latch=True)`, `ops.Runtime(dual_latch=True)`) runs the
+output groups in pairs, one on each latch, and a pair shares its vector loads. The
+image must decode ISR[35]; `sw/runtime/test/tlatch_test` checks that.
+`./check_vs_torch.py --dual-latch` runs the same comparison on two latches.
+
+## ISA trace
+
+`--isa-trace DIR` (`PimModel(isa_trace=DIR)`) writes every program the card runs,
+one file per forward step: `step00000.isa` is the prompt, and `step0000k.isa` is
+generated token k fed back in. Each launch starts with a header line naming its
+step, token position, decoder layer, node and the board's RUN_CYC for it, followed
+by one line per ISR with its decoded fields and the raw 256-bit word:
+
+```
+# launch 812  step 1  pos 7  layer 3  q_proj  part 1  isrs 194  run_cyc 51234  us 60
+  #     op      OPSIZE  ROW      COL  CH    PU     GBMC   T  word (bit 255 first)
+  0     WRVEC   64      0        0    0x3   0      0      0  0000...
+```
+
+`grep '^# launch' DIR/step*.isa` lists the launches, and `DIR/steps.tsv` has each
+step's launches, ISRs and RUN_CYC. `pimllm/isa_trace.py` describes every field.
 
 ## Why the budget module has no device in it
 

@@ -333,21 +333,26 @@ const char *pim_isr_opname(uint32_t opcode)
 void pim_prog_dump(const pim_prog *p, FILE *out)
 {
     if (!p || !out) return;
-    fprintf(out, "  %-3s %-7s %-7s %-8s %-4s %-5s %-6s %-6s %s\n",
-            "#", "op", "OPSIZE", "ROW", "COL", "CH", "PU", "GBMC", "T");
+    fprintf(out, "  %-5s %-7s %-7s %-8s %-4s %-5s %-6s %-6s %-2s %s\n",
+            "#", "op", "OPSIZE", "ROW", "COL", "CH", "PU", "GBMC", "T",
+            "word (bit 255 first)");
     for (uint32_t i = 0; i < p->n; i++) {
         pim_isr_info d;
         pim_isr_decode(&p->w[i], &d);
-        fprintf(out, "  %-3u %-7s %-7u %-8u %-4u %#-5x %#-6x %#-6x %u\n",
+        fprintf(out, "  %-5u %-7s %-7u %-8u %-4u %#-5x %#-6x %#-6x %-2u "
+                "%016llx%016llx%016llx%016llx\n",
                 i, pim_isr_opname(d.opcode), d.opsize, d.row, d.col,
-                d.ch_mask, d.pu_mask, d.gb_mc_mask, d.t);
+                d.ch_mask, d.pu_mask, d.gb_mc_mask, d.t,
+                (unsigned long long)p->w[i].w[3], (unsigned long long)p->w[i].w[2],
+                (unsigned long long)p->w[i].w[1], (unsigned long long)p->w[i].w[0]);
     }
 }
 
 const char *pim_prog_verify(const pim_prog *p, unsigned flags)
 {
     static char buf[260];
-    uint32_t gb_opsize = 0;          // OPSIZE of the WRVEC that last filled the GB
+    uint32_t gb_len = 0;             // beats the last WRVEC wrote; the read position wraps here
+    uint32_t gb_pos = 0;             // the Global Buffer's read position, in beats
     bool     gb_filled = false;
     uint32_t undrained[2] = { 0, 0 };  // MACs into each latch since its RD_MAC
     uint32_t seen[64];
@@ -377,22 +382,31 @@ const char *pim_prog_verify(const pim_prog *p, unsigned flags)
 
         switch (op) {
         case ISR_OP_WRVEC:
-            gb_opsize = sz; gb_filled = true;
+            // Rule 1.  The vector before this one must have been read in whole passes.
+            if (gb_pos) {
+                snprintf(buf, sizeof buf,
+                         "ISR %u: WRVEC while the GB read position is at beat %u of "
+                         "%u; the MACs before it stopped part-way through the vector",
+                         i, gb_pos, gb_len);
+                return buf;
+            }
+            gb_len = sz; gb_pos = 0; gb_filled = true;
             break;
         case ISR_OP_MAC:
-            // Rule 1.  The skid below the GB has no flush port.
-            if (!gb_filled) {
+            // Rule 1.  A MAC reads OPSIZE beats from the GB read position, which then
+            // moves on and wraps at the end of what the last WRVEC wrote.
+            if (!gb_filled || !gb_len) {
                 snprintf(buf, sizeof buf,
                          "ISR %u is a MAC with nothing having filled the GB", i);
                 return buf;
             }
-            if (sz != gb_opsize) {
+            if (gb_pos + sz > gb_len) {
                 snprintf(buf, sizeof buf,
-                         "ISR %u: MAC OPSIZE %u but the GB was filled with %u.  The "
-                         "skid below the GB has no flush port, so the next MAC would "
-                         "start its vector at the wrong element.", i, sz, gb_opsize);
+                         "ISR %u: MAC reads %u beats from beat %u of a %u-beat vector, "
+                         "across its end", i, sz, gb_pos, gb_len);
                 return buf;
             }
+            gb_pos = (gb_pos + sz) % gb_len;
             undrained[t & 1u]++;
             break;
         case ISR_OP_RD_MAC:
@@ -421,6 +435,13 @@ const char *pim_prog_verify(const pim_prog *p, unsigned flags)
                      undrained[t], t);
             return buf;
         }
+    // Rule 1 again: the next program's vector must start at beat 0.
+    if (gb_pos) {
+        snprintf(buf, sizeof buf,
+                 "the program ends with the GB read position at beat %u of %u; the "
+                 "MACs stopped part-way through the vector", gb_pos, gb_len);
+        return buf;
+    }
     // Rule 4.  done rises when the fetcher ACCEPTS the last ISR.
     if (emu_isr_produces_result(f(&p->w[p->n - 1], ISR_F_OPCODE)))
         return "the last ISR produces a result, and done rises when the fetcher "
@@ -476,8 +497,15 @@ const char *pim_exec_run(pim_exec *e, const pim_prog *p, pim_launch *out)
                          "never started.", e->timeout_ms, out ? out->polls : 0,
                       cfr_rd(e, CFR_STATUS));
     if (out) {
+        uint32_t lo, hi;
+
         out->us           = now_us() - t0;
         out->status_after = cfr_rd(e, CFR_STATUS);
+        // RUN_CYC stops counting when done rises, so after done LO and HI are
+        // stable and two reads give one value.
+        lo = cfr_rd(e, CFR_RUN_CYC_LO);
+        hi = cfr_rd(e, CFR_RUN_CYC_HI);
+        out->run_cyc = CFR_RUN_CYC(lo, hi);
     }
     // A TIMEOUT IS THE ERROR IT IS.  This used to return success and let the caller
     // decide from a poisoned result word; nothing does that any more, so a launch

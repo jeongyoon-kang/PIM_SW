@@ -287,8 +287,8 @@ static void phase0_verifier(void)
     if (bad) printf("     \"%.70s...\"\n", bad);
     CHECK(bad != NULL, "the verifier accepted a duplicated RD_MAC word");
 
-    // A MAC whose OPSIZE does not match the WRVEC that filled the GB.  Rebuild with
-    // a short last chunk and then lengthen its MAC.
+    // A MAC longer than the vector in the GB, so it would read across its end.
+    // Rebuild with a short last chunk and then lengthen its MAC.
     {
         pim_tensor s = w;
         s = mkw(&g, 1, 1500);
@@ -298,10 +298,10 @@ static void phase0_verifier(void)
         // OPSIZE is 64 rather than 30.
         prog.w[3] = prog.w[1];
         bad = pim_prog_verify(&prog, 0);
-        printf("  %-38s -> %s\n", "MAC OPSIZE != the WRVEC that filled GB",
+        printf("  %-38s -> %s\n", "MAC longer than the vector in the GB",
                bad ? "refused" : "ACCEPTED (BUG)");
         if (bad) printf("     \"%.70s...\"\n", bad);
-        CHECK(bad != NULL, "the verifier accepted a MAC/WRVEC OPSIZE mismatch");
+        CHECK(bad != NULL, "the verifier accepted a MAC reading past the vector's end");
     }
 }
 
